@@ -182,15 +182,26 @@ main{
 .todo-item{
   background:var(--bg-elevated); border-radius:0.875rem; margin-bottom:0.625rem; box-shadow:var(--shadow);
   padding:0.75rem; padding-left:1.125rem; overflow:hidden; position:relative;
+  transition:opacity 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .todo-item::before{
   content:""; position:absolute; left:0; top:0; bottom:0; width:0.375rem;
   background:var(--todo-color, transparent);
 }
-.todo-main{display:flex; align-items:flex-start; gap:0.375rem;}
+.todo-item.dragging{ opacity:0.45; }
+.todo-item.drag-over{
+  box-shadow:0 0 0 2px var(--accent), var(--shadow-lg); transform:scale(1.015);
+}
+.todo-main{display:flex; align-items:flex-start; gap:0.25rem;}
+.drag-handle{
+  flex-shrink:0; width:1.625rem; height:2.75rem; display:flex; align-items:center; justify-content:center;
+  color:var(--text-tertiary); font-size:1rem; cursor:grab; touch-action:none;
+  margin:-0.375rem 0 0 -0.5rem; -webkit-user-select:none; user-select:none;
+}
+.drag-handle:active{cursor:grabbing; color:var(--accent);}
 .check-btn{
   border:none;background:none;font-size:1.375rem;color:var(--text-tertiary);cursor:pointer;flex-shrink:0;line-height:1;
-  width:2.75rem;height:2.75rem;display:flex;align-items:center;justify-content:center;margin:-0.375rem 0 0 -0.5rem;
+  width:2.75rem;height:2.75rem;display:flex;align-items:center;justify-content:center;margin:-0.375rem 0 0 0;
 }
 .todo-item.done .check-btn{color:var(--accent-green);}
 .todo-content{flex:1; min-width:0;}
@@ -219,6 +230,7 @@ main{
 #listView.weekly-mode .todo-date{font-size:0.85rem;}
 #listView.weekly-mode .genre-badge{font-size:0.8rem; padding:3px 0.625rem;}
 #listView.weekly-mode .check-btn{font-size:1.7rem;}
+#listView.weekly-mode .drag-handle{font-size:1.2rem;}
 #listView.weekly-mode .progress-input{font-size:0.95rem; min-height:3.25rem; padding:0.75rem 0.875rem;}
 @media (min-width:640px){
   #listView.weekly-mode{ display:grid; grid-template-columns:1fr 1fr; gap:1rem; align-items:start; }
@@ -297,6 +309,7 @@ main{
   width:100%; padding:0.75rem; min-height:2.75rem; border-radius:0.625rem; border:none; background:var(--accent); color:var(--accent-text);
   font-size:0.9375rem; font-weight:700; cursor:pointer;
 }
+.primary-btn:disabled{opacity:0.55; cursor:not-allowed;}
 
 .item-list{display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1rem;}
 .item-row{display:flex; align-items:center; gap:0.5rem; background:var(--bg-elevated); padding:0.5rem 0.625rem; border-radius:0.625rem; min-height:2.75rem;}
@@ -614,6 +627,8 @@ let dayModalDate = null;       // iso date string currently shown in day modal
 let pendingReturnToDay = null; // day modal iso to reopen once todoModal closes
 let progressSaveTimers = {};
 let dragSourceId = null;
+let dragOverEl = null;
+let touchDrag = null; // { id, el, currentTarget } — active only during a touch-driven drag gesture
 
 /* ---------------------------------------------------------------- */
 /* TimeTree launch                                                     */
@@ -750,7 +765,9 @@ let firebaseApp = null;
 let firestoreDb = null;
 let firestoreUnsub = null;
 let scriptsLoaded = false;
+let scriptsLoadPromise = null;
 let applyingRemote = false;
+let connectingFirebase = false;
 
 function loadScript(src){
   return new Promise((resolve, reject) => {
@@ -761,11 +778,16 @@ function loadScript(src){
     document.head.appendChild(s);
   });
 }
-async function ensureFirebaseScripts(){
-  if (scriptsLoaded) return;
-  await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
-  await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
-  scriptsLoaded = true;
+function ensureFirebaseScripts(){
+  if (scriptsLoaded) return Promise.resolve();
+  if (!scriptsLoadPromise) {
+    scriptsLoadPromise = (async () => {
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
+      scriptsLoaded = true;
+    })().catch((e) => { scriptsLoadPromise = null; throw e; });
+  }
+  return scriptsLoadPromise;
 }
 
 function parseFirebaseConfigInput(raw){
@@ -810,6 +832,8 @@ function hasStoredConfig(){
 }
 
 async function connectFirebase(config, {silent} = {}){
+  if (connectingFirebase) return; // guard against overlapping connect attempts (e.g. double-tap)
+  connectingFirebase = true;
   try {
     await ensureFirebaseScripts();
     if (firestoreUnsub) { firestoreUnsub(); firestoreUnsub = null; }
@@ -850,6 +874,8 @@ async function connectFirebase(config, {silent} = {}){
     firestoreDb = null;
     if (!silent) showToast('接続に失敗しました: ' + e.message);
     throw e;
+  } finally {
+    connectingFirebase = false;
   }
 }
 
@@ -1017,6 +1043,7 @@ function renderTodoItem(todo){
   return `
   <div class="todo-item ${todo.done?'done':''}" data-id="${todo.id}" draggable="true" style="${cardStyle}">
     <div class="todo-main">
+      <span class="drag-handle" data-action="drag-handle" data-id="${todo.id}" title="ドラッグして並び替え"><i class="fa-solid fa-grip-lines-vertical"></i></span>
       <button class="check-btn" data-action="toggle" data-id="${todo.id}"><i class="fa-${todo.done?'solid fa-circle-check':'regular fa-circle'}"></i></button>
       <div class="todo-content">
         <div class="todo-title-row">
@@ -1205,6 +1232,7 @@ function hideDayModalIfOpenFor(){
 function openTodoModal(defaults){
   hideDayModalIfOpenFor();
   editingTodoId = null;
+  document.getElementById('todoModalSave').disabled = false;
   document.getElementById('todoModalTitle').textContent = '新規ToDo';
   document.getElementById('todoDeleteBtn').hidden = true;
   document.getElementById('todoTitleInput').value = '';
@@ -1222,6 +1250,7 @@ function openTodoModalForEdit(id){
   if (!t) return;
   hideDayModalIfOpenFor();
   editingTodoId = id;
+  document.getElementById('todoModalSave').disabled = false;
   document.getElementById('todoModalTitle').textContent = 'ToDoを編集';
   document.getElementById('todoDeleteBtn').hidden = false;
   document.getElementById('todoTitleInput').value = t.title;
@@ -1243,8 +1272,11 @@ function closeTodoModal(){
   }
 }
 function saveTodoModal(){
+  const saveBtn = document.getElementById('todoModalSave');
+  if (saveBtn.disabled) return; // guard against double-tap / duplicate submit
   const title = document.getElementById('todoTitleInput').value.trim();
   if (!title) { showToast('タイトルを入力してください'); return; }
+  saveBtn.disabled = true;
   const date = document.getElementById('todoDateInput').value || toISO(ui.refDate);
   const workspaceId = document.getElementById('todoWorkspaceInput').value || ui.activeWorkspace;
   const genreId = document.getElementById('todoGenreInput').value || null;
@@ -1589,40 +1621,100 @@ function wireEvents(){
   // TimeTree launch button
   document.getElementById('timetreeBtn').addEventListener('click', openTimeTree);
 
-  // Drag & drop reordering
+  // Drag & drop reordering — mouse/desktop via HTML5 DnD, started only from the grip handle
   document.addEventListener('dragstart', (e) => {
+    if (touchDrag) { e.preventDefault(); return; } // a touch-driven drag is already in control (avoid double handling)
     const item = e.target.closest('.todo-item');
     if (!item) return;
+    if (!e.target.closest('.drag-handle')) { e.preventDefault(); return; }
     dragSourceId = item.dataset.id;
+    item.classList.add('dragging');
     try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragSourceId); } catch(err){}
   });
   document.addEventListener('dragover', (e) => {
     if (!dragSourceId) return;
     const item = e.target.closest('.todo-item');
-    if (!item) return;
+    if (!item || item.dataset.id === dragSourceId) return;
     e.preventDefault();
+    if (dragOverEl && dragOverEl !== item) dragOverEl.classList.remove('drag-over');
+    item.classList.add('drag-over');
+    dragOverEl = item;
   });
   document.addEventListener('drop', (e) => {
     if (!dragSourceId) return;
     const item = e.target.closest('.todo-item');
     if (item) { e.preventDefault(); reorderByDrag(dragSourceId, item.dataset.id); }
-    dragSourceId = null;
+    endDesktopDrag();
   });
+  document.addEventListener('dragend', endDesktopDrag);
+  function endDesktopDrag(){
+    const source = dragSourceId && document.querySelector(`.todo-item.dragging`);
+    if (source) source.classList.remove('dragging');
+    if (dragOverEl) { dragOverEl.classList.remove('drag-over'); dragOverEl = null; }
+    dragSourceId = null;
+  }
+
+  // Drag & drop reordering — touch (iOS/Android), since native HTML5 DnD doesn't fire via touch on iOS
+  document.addEventListener('touchstart', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    const card = handle.closest('.todo-item');
+    if (!card) return;
+    touchDrag = { id: card.dataset.id, el: card, currentTarget: null };
+    card.classList.add('dragging');
+  }, { passive: true });
+
+  document.addEventListener('touchmove', (e) => {
+    if (!touchDrag) return;
+    e.preventDefault(); // block page scroll while actively dragging a card
+    const touch = e.touches[0];
+    const el = document.elementFromPoint(touch.clientX, touch.clientY);
+    const targetCard = el && el.closest('.todo-item');
+    if (touchDrag.currentTarget && touchDrag.currentTarget !== targetCard) {
+      touchDrag.currentTarget.classList.remove('drag-over');
+      touchDrag.currentTarget = null;
+    }
+    if (targetCard && targetCard !== touchDrag.el) {
+      targetCard.classList.add('drag-over');
+      touchDrag.currentTarget = targetCard;
+    }
+  }, { passive: false });
+
+  function endTouchDrag(){
+    if (!touchDrag) return;
+    touchDrag.el.classList.remove('dragging');
+    if (touchDrag.currentTarget) {
+      touchDrag.currentTarget.classList.remove('drag-over');
+      reorderByDrag(touchDrag.id, touchDrag.currentTarget.dataset.id);
+    }
+    touchDrag = null;
+  }
+  document.addEventListener('touchend', endTouchDrag);
+  document.addEventListener('touchcancel', endTouchDrag);
 
   // Sync modal
   document.getElementById('syncModalClose').addEventListener('click', closeSyncModal);
   document.getElementById('syncModal').addEventListener('click', (e) => {
     if (e.target.id === 'syncModal') closeSyncModal();
   });
-  document.getElementById('saveSyncBtn').addEventListener('click', async () => {
+  document.getElementById('saveSyncBtn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    if (btn.disabled) return; // guard against double-tap while connecting
     const raw = document.getElementById('firebaseConfigInput').value;
     let config;
     try { config = parseFirebaseConfigInput(raw); }
     catch (e) { showToast('設定の読み取りに失敗: ' + e.message); return; }
+    const originalLabel = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '接続中...';
     try {
       localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
       await connectFirebase(config);
     } catch(e) { /* status already shown */ }
+    finally {
+      btn.disabled = false;
+      btn.textContent = originalLabel;
+    }
   });
   document.getElementById('disconnectSyncBtn').addEventListener('click', () => {
     if (confirm('同期を解除してオフラインモードに戻しますか？')) disconnectFirebase();
@@ -1643,7 +1735,8 @@ function wireEvents(){
     if (moveDownBtn) { moveTodo(moveDownBtn.dataset.id, 1); return; }
     const toggleColorBtn = e.target.closest('[data-action="toggle-color-picker"]');
     if (toggleColorBtn) {
-      const row = document.querySelector(`.inline-color-picker[data-id="${CSS.escape(toggleColorBtn.dataset.id)}"]`);
+      const card = toggleColorBtn.closest('.todo-item');
+      const row = card && card.querySelector('.inline-color-picker');
       if (row) row.hidden = !row.hidden;
       return;
     }
