@@ -258,6 +258,36 @@ main{
 .cal-chip.done{opacity:0.5; text-decoration:line-through;}
 .cal-more{font-size:0.625rem; color:var(--text-tertiary); padding-left:2px;}
 
+/* ---- large screen / desktop layout (PC・大画面モニター) ---- */
+@media screen and (min-width:768px){
+  #app{ max-width:1400px; }
+  main{
+    padding-left:calc(1.5rem + env(safe-area-inset-left));
+    padding-right:calc(1.5rem + env(safe-area-inset-right));
+  }
+  /* keep the toolbar-like control/nav rows compact and centered even though #app is wide */
+  .control-bar, .nav-bar{ max-width:40rem; margin-left:auto; margin-right:auto; }
+
+  /* multi-column card grid: daily = flat card grid, monthly = one column per date */
+  #listView:not(.weekly-mode){
+    display:grid; grid-template-columns:repeat(auto-fill, minmax(21rem,1fr)); gap:1rem; align-items:start;
+  }
+  #listView:not(.weekly-mode) > .day-group{ margin-bottom:0; }
+  #listView:not(.weekly-mode) > .todo-item{ margin-bottom:0; }
+  /* weekly mode already grids at 640px with 2 fixed columns — let it auto-expand to 3+ on wide screens */
+  #listView.weekly-mode{ grid-template-columns:repeat(auto-fit, minmax(20rem,1fr)); }
+
+  /* calendar: use the extra width for bigger, easier-to-read cells; lay multiple months side by side */
+  .calendar-view.multi-month{
+    display:grid; grid-template-columns:repeat(auto-fit, minmax(22rem,1fr)); gap:1.5rem; align-items:start;
+  }
+  .calendar-view.multi-month .month-block{ margin-bottom:0; }
+  .cal-cell{ min-height:7.5rem; padding:0.5rem; }
+  .cal-daynum{ font-size:0.875rem; }
+  .cal-chip{ font-size:0.75rem; padding:3px 0.4375rem; }
+  .month-title{ font-size:1.25rem; }
+}
+
 .fab-wrap{
   position:fixed; left:0; right:0; bottom:0; max-width:45rem; margin:0 auto; height:0;
   z-index:40; pointer-events:none;
@@ -1083,6 +1113,7 @@ function renderTodoItem(todo){
 function renderCalendarView(){
   const container = document.getElementById('calendarView');
   const n = periodMonthsOrWeeks();
+  container.classList.toggle('multi-month', n.unit === 'month');
   const items = visibleTodos();
   const todosByDate = {};
   items.forEach(t => { (todosByDate[t.date] = todosByDate[t.date] || []).push(t); });
