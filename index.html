@@ -1,0 +1,1475 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<title>ToDo — 多機能タスク管理</title>
+<script>
+(function(){
+  try {
+    var raw = localStorage.getItem('todoapp_prefs_v1');
+    var theme = null, fontSize = 'standard', fontFamily = 'gothic';
+    if (raw) {
+      var p = JSON.parse(raw);
+      theme = p.colorTheme || null;
+      fontSize = p.fontSize || fontSize;
+      fontFamily = p.fontFamily || fontFamily;
+    }
+    if (!theme) {
+      theme = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    document.documentElement.setAttribute('data-theme', theme);
+    document.documentElement.setAttribute('data-fontsize', fontSize);
+    document.documentElement.setAttribute('data-font', fontFamily);
+  } catch(e){}
+})();
+</script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+<style>
+:root{
+  --bg:#f2f2f7; --bg-elevated:#ffffff; --bg-secondary:#eceef1; --bg-input:#ffffff;
+  --text:#1c1c1e; --text-secondary:#6e6e73; --text-tertiary:#aeaeb2;
+  --border:rgba(60,60,67,0.29); --border-strong:rgba(60,60,67,0.4);
+  --accent:#007aff; --accent-text:#ffffff; --accent-green:#34c759; --danger:#ff3b30;
+  --shadow:0 2px 10px rgba(0,0,0,0.08); --shadow-lg:0 8px 30px rgba(0,0,0,0.18);
+  --chip-bg:#e5e5ea; --overlay:rgba(0,0,0,0.35);
+  --font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",sans-serif;
+  color-scheme: light;
+}
+:root[data-theme="dark"]{
+  --bg:#000000; --bg-elevated:#1c1c1e; --bg-secondary:#1c1c1e; --bg-input:#2c2c2e;
+  --text:#f2f2f7; --text-secondary:#98989d; --text-tertiary:#636366;
+  --border:rgba(84,84,88,0.65); --border-strong:rgba(84,84,88,0.8);
+  --accent:#0a84ff; --accent-text:#ffffff; --accent-green:#30d158; --danger:#ff453a;
+  --shadow:0 2px 10px rgba(0,0,0,0.5); --shadow-lg:0 8px 30px rgba(0,0,0,0.6);
+  --chip-bg:#2c2c2e; --overlay:rgba(0,0,0,0.55);
+  color-scheme: dark;
+}
+:root[data-theme="leather"]{
+  --bg:#17130e; --bg-elevated:#231c14; --bg-secondary:#1d1712; --bg-input:#2a2118;
+  --text:#efe6d8; --text-secondary:#b9a988; --text-tertiary:#8a7c64;
+  --border:rgba(201,162,103,0.28); --border-strong:rgba(201,162,103,0.45);
+  --accent:#c9a267; --accent-text:#241a0d; --accent-green:#8fb996; --danger:#c0604f;
+  --shadow:0 2px 10px rgba(0,0,0,0.4); --shadow-lg:0 8px 30px rgba(0,0,0,0.55);
+  --chip-bg:#2a2118; --overlay:rgba(0,0,0,0.6);
+  color-scheme: dark;
+}
+:root[data-theme="modern"]{
+  --bg:#000000; --bg-elevated:#121212; --bg-secondary:#0a0a0a; --bg-input:#1a1a1a;
+  --text:#f5f5f5; --text-secondary:#9a9a9a; --text-tertiary:#5c5c5c;
+  --border:rgba(255,255,255,0.10); --border-strong:rgba(255,255,255,0.18);
+  --accent:#5e5ce6; --accent-text:#ffffff; --accent-green:#32d74b; --danger:#ff453a;
+  --shadow:0 2px 10px rgba(0,0,0,0.6); --shadow-lg:0 8px 30px rgba(0,0,0,0.7);
+  --chip-bg:#1a1a1a; --overlay:rgba(0,0,0,0.65);
+  color-scheme: dark;
+}
+:root[data-font="mincho"]{ --font-family:"Hiragino Mincho ProN","Yu Mincho","Noto Serif JP",serif; }
+:root[data-font="maru"]{ --font-family:"Hiragino Maru Gothic ProN","Yu Gothic","Hiragino Sans",sans-serif; }
+
+html{ font-size:16px; }
+html[data-fontsize="large"]{ font-size:18.5px; }
+html[data-fontsize="xlarge"]{ font-size:22px; }
+
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+html,body{margin:0;padding:0;height:100%;}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:var(--font-family);
+  overscroll-behavior-y:none;
+}
+button,input,select,textarea{font-family:inherit;color:inherit;}
+#app{max-width:45rem;margin:0 auto;min-height:100vh;display:flex;flex-direction:column;padding-bottom:env(safe-area-inset-bottom);}
+
+.topbar{
+  position:sticky; top:0; z-index:20;
+  display:flex; align-items:center; justify-content:space-between;
+  padding:calc(0.625rem + env(safe-area-inset-top)) 1rem 0.625rem;
+  background:color-mix(in srgb, var(--bg) 85%, transparent);
+  backdrop-filter:blur(20px); -webkit-backdrop-filter:blur(20px);
+  border-bottom:0.5px solid var(--border);
+}
+.topbar-left{display:flex;align-items:center;gap:0.5rem;}
+.topbar-left h1{font-size:1.25rem;font-weight:700;margin:0;letter-spacing:-0.3px;}
+.topbar-left i{color:var(--accent);font-size:1.125rem;}
+.topbar-right{display:flex;gap:0.375rem;}
+.icon-btn{
+  width:2.125rem;height:2.125rem;border-radius:50%;border:none;background:var(--chip-bg);
+  color:var(--text);display:flex;align-items:center;justify-content:center;font-size:0.875rem;
+  cursor:pointer; flex-shrink:0; position:relative;
+}
+.icon-btn:active{transform:scale(0.92);}
+.icon-btn.danger{color:var(--danger);}
+.icon-btn.connected::after{
+  content:"";position:absolute;top:-1px;right:-1px;width:0.5625rem;height:0.5625rem;border-radius:50%;
+  background:var(--accent-green);border:2px solid var(--bg);
+}
+.icon-btn.errored::after{
+  content:"";position:absolute;top:-1px;right:-1px;width:0.5625rem;height:0.5625rem;border-radius:50%;
+  background:var(--danger);border:2px solid var(--bg);
+}
+
+.workspace-bar{
+  display:flex; gap:0.5rem; padding:0.75rem 1rem 0.25rem; overflow-x:auto; scrollbar-width:none;
+}
+.workspace-bar::-webkit-scrollbar{display:none;}
+.ws-tab{
+  flex-shrink:0; border:none; padding:0.625rem 1.125rem; border-radius:0.75rem; font-size:0.95rem; font-weight:800;
+  background:var(--chip-bg); color:var(--text-secondary); cursor:pointer; white-space:nowrap;
+}
+.ws-tab.active{background:var(--accent); color:var(--accent-text);}
+.ws-tab.ws-manage{background:transparent; color:var(--text-tertiary); padding:0.625rem 0.625rem; font-weight:400;}
+
+.genre-bar{
+  display:flex; gap:0.5rem; padding:0.625rem 1rem; overflow-x:auto; scrollbar-width:none;
+  border-bottom:0.5px solid var(--border);
+}
+.genre-bar::-webkit-scrollbar{display:none;}
+.chip{
+  flex-shrink:0; border:none; padding:0.4375rem 0.875rem; border-radius:1rem; font-size:0.84375rem; font-weight:600;
+  background:var(--chip-bg); color:var(--text-secondary); cursor:pointer; white-space:nowrap;
+  display:flex; align-items:center; gap:0.375rem;
+}
+.chip.active{background:var(--accent); color:var(--accent-text);}
+.chip .dot{width:0.5rem;height:0.5rem;border-radius:50%;background:var(--dot,#999);}
+.chip-manage{background:transparent; color:var(--text-tertiary); padding:0.4375rem 0.625rem;}
+
+.control-bar{
+  display:flex; align-items:center; justify-content:space-between; gap:0.625rem;
+  padding:0.625rem 1rem; flex-wrap:wrap;
+}
+.seg-control,.view-toggle{
+  display:inline-flex; background:var(--chip-bg); border-radius:0.5625rem; padding:2px; gap:2px;
+}
+.seg-btn{
+  border:none; background:transparent; color:var(--text-secondary); font-size:0.84375rem; font-weight:600;
+  padding:0.375rem 0.75rem; border-radius:0.4375rem; cursor:pointer;
+}
+.seg-btn.active{background:var(--bg-elevated); color:var(--text); box-shadow:0 1px 3px rgba(0,0,0,0.15);}
+.period-select{
+  appearance:none; -webkit-appearance:none; border:none; background:var(--chip-bg); color:var(--text);
+  font-size:0.84375rem; font-weight:600; padding:0.5rem 1.75rem 0.5rem 0.75rem; border-radius:0.5625rem; cursor:pointer;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M0 0l5 6 5-6z' fill='%236e6e73'/></svg>");
+  background-repeat:no-repeat; background-position:right 0.625rem center;
+}
+
+.nav-bar{
+  display:flex; align-items:center; justify-content:space-between; padding:0.25rem 1rem 0.75rem; gap:0.625rem;
+}
+.nav-label{font-size:0.9375rem; font-weight:700; flex:1; text-align:center;}
+.text-btn{border:none;background:transparent;color:var(--accent);font-size:0.9375rem;font-weight:600;cursor:pointer;padding:0.375rem 0.25rem;}
+.text-btn.primary{font-weight:700;}
+.text-btn:disabled{opacity:0.4;}
+
+main{flex:1; padding:0 1rem 6.5rem;}
+
+/* ---- list view ---- */
+.day-group{margin-bottom:1.125rem;}
+.day-group-title{font-size:0.8125rem; font-weight:700; color:var(--text-secondary); text-transform:uppercase; letter-spacing:0.4px; margin:0 0 0.5rem 0.125rem;}
+.todo-item{
+  background:var(--bg-elevated); border-radius:0.875rem; margin-bottom:0.625rem; box-shadow:var(--shadow);
+  padding:0.75rem; overflow:hidden;
+}
+.todo-main{display:flex; align-items:flex-start; gap:0.625rem;}
+.check-btn{border:none;background:none;font-size:1.375rem;color:var(--text-tertiary);cursor:pointer;padding:2px;flex-shrink:0;line-height:1;}
+.todo-item.done .check-btn{color:var(--accent-green);}
+.todo-content{flex:1; min-width:0;}
+.todo-title-row{display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap;}
+.todo-title{font-size:1rem; font-weight:600; cursor:pointer; word-break:break-word;}
+.todo-item.done .todo-title{color:var(--text-tertiary); text-decoration:line-through;}
+.genre-badge{
+  font-size:0.71875rem; font-weight:700; padding:2px 0.5rem; border-radius:0.5rem; color:#fff; background:var(--gc,#888);
+  flex-shrink:0;
+}
+.todo-date{font-size:0.78125rem; color:var(--text-secondary); margin-top:0.125rem;}
+.progress-input{
+  width:100%; margin-top:0.5rem; border:1px solid var(--border); background:var(--bg-input); color:var(--text);
+  border-radius:0.5625rem; padding:0.5rem 0.625rem; font-size:0.84375rem; resize:vertical; min-height:2.375rem;
+}
+.progress-input::placeholder{color:var(--text-tertiary);}
+.todo-item .icon-btn{background:transparent;}
+.empty-state{text-align:center; padding:3.75rem 1.25rem; color:var(--text-tertiary);}
+.empty-state i{font-size:2.125rem; margin-bottom:0.75rem; display:block;}
+
+/* ---- weekly mode: bigger, roomier cards ---- */
+#listView.weekly-mode .day-group{margin-bottom:1.625rem;}
+#listView.weekly-mode .day-group-title{font-size:1.0625rem; margin-bottom:0.75rem;}
+#listView.weekly-mode .todo-item{padding:1.125rem 1rem; border-radius:1rem; margin-bottom:0.875rem;}
+#listView.weekly-mode .todo-title{font-size:1.15rem;}
+#listView.weekly-mode .todo-date{font-size:0.85rem;}
+#listView.weekly-mode .genre-badge{font-size:0.8rem; padding:3px 0.625rem;}
+#listView.weekly-mode .check-btn{font-size:1.7rem;}
+#listView.weekly-mode .progress-input{font-size:0.95rem; min-height:3.25rem; padding:0.75rem 0.875rem;}
+@media (min-width:640px){
+  #listView.weekly-mode{ display:grid; grid-template-columns:1fr 1fr; gap:1rem; align-items:start; }
+  #listView.weekly-mode .day-group{ margin-bottom:0; }
+}
+
+/* ---- calendar view ---- */
+.month-block{margin-bottom:1.375rem;}
+.month-title{font-size:1rem; font-weight:700; margin:0 0 0.5rem 0.125rem;}
+.weekday-row{display:grid; grid-template-columns:repeat(7,1fr); gap:0.25rem; margin-bottom:0.25rem;}
+.weekday-row span{text-align:center; font-size:0.71875rem; font-weight:700; color:var(--text-tertiary);}
+.cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:0.25rem;}
+.cal-cell{
+  background:var(--bg-elevated); border-radius:0.625rem; min-height:4.875rem; padding:0.3125rem; cursor:pointer;
+  display:flex; flex-direction:column; gap:0.1875rem; box-shadow:var(--shadow); border:1px solid transparent;
+}
+.cal-cell.pad{background:transparent; box-shadow:none;}
+.cal-cell.today{border-color:var(--accent);}
+.cal-daynum{font-size:0.75rem; font-weight:700; color:var(--text-secondary);}
+.cal-cell.pad .cal-daynum{color:var(--text-tertiary);}
+.cal-chip{
+  font-size:0.65625rem; font-weight:600; padding:2px 0.3125rem; border-radius:0.3125rem; background:var(--gc,#888); color:#fff;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.cal-chip.done{opacity:0.5; text-decoration:line-through;}
+.cal-more{font-size:0.625rem; color:var(--text-tertiary); padding-left:2px;}
+
+.fab-wrap{
+  position:fixed; left:0; right:0; bottom:0; max-width:45rem; margin:0 auto; height:0;
+  z-index:40; pointer-events:none;
+}
+.fab{
+  position:absolute; right:1.25rem; bottom:calc(1.5rem + env(safe-area-inset-bottom));
+  width:3.5rem; height:3.5rem; border-radius:50%; border:none; background:var(--accent); color:var(--accent-text);
+  font-size:1.375rem; box-shadow:0 6px 20px rgba(0,0,0,0.3); cursor:pointer; pointer-events:auto;
+}
+.fab:active{transform:scale(0.94);}
+
+/* ---- modals ---- */
+.modal-overlay{
+  position:fixed; inset:0; background:var(--overlay); z-index:100;
+  display:flex; align-items:flex-end; justify-content:center;
+}
+#todoModal.modal-overlay{ z-index:110; }
+@media (min-width:600px){ .modal-overlay{ align-items:center; } }
+.sheet{
+  background:var(--bg-secondary); width:100%; max-width:32.5rem; border-radius:1rem 1rem 0 0;
+  max-height:88vh; display:flex; flex-direction:column; animation:slideup 0.22s ease-out;
+  padding-bottom:env(safe-area-inset-bottom);
+}
+@media (min-width:600px){ .sheet{ border-radius:1rem; max-height:80vh; margin-bottom:1.25rem;} }
+@keyframes slideup{from{transform:translateY(24px); opacity:0.6;} to{transform:translateY(0); opacity:1;}}
+.sheet-header{
+  display:flex; align-items:center; justify-content:space-between; padding:0.875rem;
+  border-bottom:0.5px solid var(--border); flex-shrink:0;
+}
+.sheet-header h3{margin:0; font-size:1rem; font-weight:700;}
+.sheet-body{padding:1rem; overflow-y:auto;}
+.sheet-body label{display:block; font-size:0.8125rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.875rem;}
+.sheet-body input[type=text], .sheet-body input[type=date], .sheet-body select, .sheet-body textarea{
+  width:100%; margin-top:0.375rem; padding:0.6875rem 0.75rem; border-radius:0.625rem; border:1px solid var(--border);
+  background:var(--bg-input); font-size:0.9375rem; font-weight:400; color:var(--text);
+}
+.sheet-body textarea{resize:vertical; min-height:4.375rem;}
+.checkbox-row{display:flex; align-items:center; gap:0.5rem; font-size:0.9375rem;}
+.checkbox-row input{width:1.125rem;height:1.125rem;}
+.danger-btn{
+  width:100%; padding:0.75rem; border-radius:0.625rem; border:none; background:var(--chip-bg); color:var(--danger);
+  font-size:0.9375rem; font-weight:700; cursor:pointer; margin-top:0.25rem;
+}
+.primary-btn{
+  width:100%; padding:0.75rem; border-radius:0.625rem; border:none; background:var(--accent); color:var(--accent-text);
+  font-size:0.9375rem; font-weight:700; cursor:pointer;
+}
+
+.item-list{display:flex; flex-direction:column; gap:0.5rem; margin-bottom:1rem;}
+.item-row{display:flex; align-items:center; gap:0.5rem; background:var(--bg-elevated); padding:0.5rem 0.625rem; border-radius:0.625rem;}
+.item-row .dot{width:0.75rem;height:0.75rem;border-radius:50%;flex-shrink:0;background:var(--gc,#888);}
+.item-row input{flex:1; border:none; background:transparent; font-size:0.9375rem; color:var(--text); padding:0.25rem; min-width:0;}
+.item-row button{border:none;background:none;color:var(--danger);font-size:0.9375rem;cursor:pointer;padding:0.25rem;flex-shrink:0;}
+.item-add-row{display:flex; gap:0.5rem;}
+.item-add-row input{flex:1; padding:0.6875rem 0.75rem; border-radius:0.625rem; border:1px solid var(--border); background:var(--bg-input); font-size:0.9375rem; color:var(--text); min-width:0;}
+
+.sync-status{
+  padding:0.75rem; border-radius:0.625rem; background:var(--bg-elevated); font-size:0.84375rem; font-weight:600;
+  margin-bottom:0.875rem; display:flex; align-items:center; gap:0.5rem;
+}
+.sync-status .dot{width:0.5625rem;height:0.5625rem;border-radius:50%;background:var(--text-tertiary);}
+.sync-status.on .dot{background:var(--accent-green);}
+.sync-status.error .dot{background:var(--danger);}
+.hint{font-size:0.78125rem; color:var(--text-secondary); line-height:1.5; margin:0 0 0.625rem;}
+#firebaseConfigInput{width:100%; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:0.78125rem;
+  padding:0.625rem; border-radius:0.625rem; border:1px solid var(--border); background:var(--bg-input); color:var(--text);}
+.sync-actions{display:flex; flex-direction:column; gap:0.5rem; margin-top:0.75rem;}
+
+.settings-section{margin-bottom:1.375rem;}
+.settings-label{font-size:0.8125rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.5rem;}
+.option-row{display:flex; gap:0.5rem; flex-wrap:wrap;}
+.option-btn{
+  flex:1; min-width:5.5rem; padding:0.75rem 0.625rem; border-radius:0.625rem; border:1px solid var(--border);
+  background:var(--bg-elevated); color:var(--text); font-size:0.875rem; font-weight:600; cursor:pointer; text-align:center;
+}
+.option-btn.active{background:var(--accent); color:var(--accent-text); border-color:var(--accent);}
+
+.toast{
+  position:fixed; bottom:calc(6.25rem + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
+  background:rgba(30,30,32,0.92); color:#fff; padding:0.625rem 1.125rem; border-radius:1.25rem; font-size:0.84375rem;
+  font-weight:600; z-index:200; box-shadow:0 4px 16px rgba(0,0,0,0.3); max-width:80vw; text-align:center;
+}
+[hidden]{display:none !important;}
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header class="topbar">
+    <div class="topbar-left"><i class="fa-solid fa-list-check"></i><h1>ToDo</h1></div>
+    <div class="topbar-right">
+      <button id="syncBtn" class="icon-btn" title="同期設定"><i class="fa-solid fa-arrows-rotate"></i></button>
+      <button id="settingsBtn" class="icon-btn" title="設定"><i class="fa-solid fa-gear"></i></button>
+    </div>
+  </header>
+
+  <div class="workspace-bar" id="workspaceBar"></div>
+
+  <div class="genre-bar" id="genreBar"></div>
+
+  <div class="control-bar">
+    <div class="view-toggle" id="viewToggle">
+      <button data-view="list" class="seg-btn active">リスト</button>
+      <button data-view="calendar" class="seg-btn">カレンダー</button>
+    </div>
+    <div id="listTabs" class="seg-control">
+      <button data-tab="daily" class="seg-btn active">日</button>
+      <button data-tab="weekly" class="seg-btn">週</button>
+      <button data-tab="monthly" class="seg-btn">月</button>
+    </div>
+    <select id="calendarPeriodSelect" class="period-select" hidden>
+      <option value="1week">1週間</option>
+      <option value="2week">2週間</option>
+      <option value="3week">3週間</option>
+      <option value="4week">4週間</option>
+      <option value="1month" selected>1ヶ月</option>
+      <option value="2month">2ヶ月</option>
+      <option value="3month">3ヶ月</option>
+    </select>
+  </div>
+
+  <div class="nav-bar">
+    <button id="prevBtn" class="icon-btn"><i class="fa-solid fa-chevron-left"></i></button>
+    <div id="navLabel" class="nav-label">—</div>
+    <button id="todayBtn" class="text-btn">今日</button>
+    <button id="nextBtn" class="icon-btn"><i class="fa-solid fa-chevron-right"></i></button>
+  </div>
+
+  <main id="mainContent">
+    <div id="listView" class="list-view"></div>
+    <div id="calendarView" class="calendar-view" hidden></div>
+  </main>
+</div>
+
+<div class="fab-wrap"><button id="addTodoBtn" class="fab" title="ToDoを追加" type="button"><i class="fa-solid fa-plus"></i></button></div>
+
+<!-- Add / Edit Todo -->
+<div id="todoModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="todoModalCancel">キャンセル</button>
+      <h3 id="todoModalTitle">新規ToDo</h3>
+      <button class="text-btn primary" id="todoModalSave">保存</button>
+    </div>
+    <div class="sheet-body">
+      <label>タイトル
+        <input type="text" id="todoTitleInput" placeholder="タスク名を入力">
+      </label>
+      <label>期日
+        <input type="date" id="todoDateInput">
+      </label>
+      <label>ワークスペース
+        <select id="todoWorkspaceInput"></select>
+      </label>
+      <label>ジャンル
+        <select id="todoGenreInput"></select>
+      </label>
+      <label class="checkbox-row" style="margin-bottom:1rem;">
+        <input type="checkbox" id="todoDoneInput"> 完了にする
+      </label>
+      <label>進捗状況メモ
+        <textarea id="todoProgressInput" placeholder="どこまで進んでいるかを記録..."></textarea>
+      </label>
+      <button id="todoDeleteBtn" class="danger-btn" hidden><i class="fa-solid fa-trash"></i> このToDoを削除</button>
+    </div>
+  </div>
+</div>
+
+<!-- Day detail (calendar tap) -->
+<div id="dayModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="dayModalClose">閉じる</button>
+      <h3 id="dayModalTitle">日付</h3>
+      <button class="text-btn primary" id="dayModalAdd"><i class="fa-solid fa-plus"></i> 追加</button>
+    </div>
+    <div class="sheet-body" id="dayModalBody"></div>
+  </div>
+</div>
+
+<!-- Genre management -->
+<div id="genreModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="genreModalClose">閉じる</button>
+      <h3>ジャンル管理</h3>
+      <div style="width:3.75rem"></div>
+    </div>
+    <div class="sheet-body">
+      <div id="genreList" class="item-list"></div>
+      <div class="item-add-row">
+        <input type="text" id="newGenreInput" placeholder="新しいジャンル名">
+        <button id="addGenreBtn" class="text-btn primary">追加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Workspace management -->
+<div id="workspaceModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="workspaceModalClose">閉じる</button>
+      <h3>ワークスペース管理</h3>
+      <div style="width:3.75rem"></div>
+    </div>
+    <div class="sheet-body">
+      <div id="workspaceList" class="item-list"></div>
+      <div class="item-add-row">
+        <input type="text" id="newWorkspaceInput" placeholder="新しいワークスペース名">
+        <button id="addWorkspaceBtn" class="text-btn primary">追加</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings (font size / theme / font family) -->
+<div id="settingsModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="settingsModalClose">閉じる</button>
+      <h3>設定</h3>
+      <div style="width:3.75rem"></div>
+    </div>
+    <div class="sheet-body">
+      <div class="settings-section">
+        <div class="settings-label">文字サイズ</div>
+        <div class="option-row" id="fontSizeOptions">
+          <button type="button" class="option-btn" data-value="standard">標準</button>
+          <button type="button" class="option-btn" data-value="large">大</button>
+          <button type="button" class="option-btn" data-value="xlarge">特大</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">カラーテーマ</div>
+        <div class="option-row" id="colorThemeOptions">
+          <button type="button" class="option-btn" data-value="light">ライト</button>
+          <button type="button" class="option-btn" data-value="dark">ダーク</button>
+          <button type="button" class="option-btn" data-value="leather">レザー風</button>
+          <button type="button" class="option-btn" data-value="modern">モダン</button>
+        </div>
+      </div>
+      <div class="settings-section">
+        <div class="settings-label">フォント</div>
+        <div class="option-row" id="fontFamilyOptions">
+          <button type="button" class="option-btn" data-value="gothic">ゴシック体</button>
+          <button type="button" class="option-btn" data-value="mincho">明朝体</button>
+          <button type="button" class="option-btn" data-value="maru">丸ゴシック</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Sync settings -->
+<div id="syncModal" class="modal-overlay" hidden>
+  <div class="sheet">
+    <div class="sheet-header">
+      <button class="text-btn" id="syncModalClose">閉じる</button>
+      <h3>同期設定</h3>
+      <div style="width:3.75rem"></div>
+    </div>
+    <div class="sheet-body">
+      <div id="syncStatus" class="sync-status"><span class="dot"></span><span id="syncStatusText">オフライン（このデバイスのみに保存）</span></div>
+      <p class="hint">Firebaseコンソール（無料）で作成したプロジェクトの「firebaseConfig」をそのまま貼り付けてください。Mac・iPhoneなど同じ設定を使うすべての端末でリアルタイムに同期されます。未設定でもオフラインで問題なく使えます。</p>
+      <textarea id="firebaseConfigInput" rows="8" placeholder='{ "apiKey": "...", "authDomain": "...", "projectId": "...", "storageBucket": "...", "messagingSenderId": "...", "appId": "..." }'></textarea>
+      <div class="sync-actions">
+        <button id="saveSyncBtn" class="primary-btn">保存して接続</button>
+        <button id="disconnectSyncBtn" class="danger-btn" hidden>接続を解除してオフラインに戻す</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script>
+(function(){
+"use strict";
+
+/* ---------------------------------------------------------------- */
+/* State                                                              */
+/* ---------------------------------------------------------------- */
+const LOCAL_KEY = 'todoapp_data_v1';
+const CONFIG_KEY = 'todoapp_firebase_config_v1';
+const PREF_KEY = 'todoapp_prefs_v1';
+const GENRE_COLORS = ['#ff9500','#5856d6','#34c759','#ff2d55','#007aff','#af52de','#ff3b30','#00c7be','#a2845e','#ffcc00'];
+
+function defaultGenres(){
+  return [
+    { id: 'leather', name: 'レザー' },
+    { id: 'music', name: '音楽' }
+  ];
+}
+function defaultWorkspaces(){
+  return [
+    { id: 'personal', name: '個人' },
+    { id: 'brooklyn', name: 'BROOKLYN LC' },
+    { id: 'okika', name: 'Okika (共同)' }
+  ];
+}
+
+let db = { todos: [], genres: defaultGenres(), workspaces: defaultWorkspaces() };
+
+let ui = {
+  viewMode: 'list',      // 'list' | 'calendar'
+  listTab: 'daily',      // 'daily' | 'weekly' | 'monthly'
+  calendarPeriod: '1month',
+  genreFilter: 'all',
+  activeWorkspace: null,
+  refDate: startOfDay(new Date()),
+  colorTheme: 'light',
+  fontSize: 'standard',
+  fontFamily: 'gothic'
+};
+
+let editingTodoId = null;      // when set, todoModal is in edit mode
+let dayModalDate = null;       // iso date string currently shown in day modal
+let pendingReturnToDay = null; // day modal iso to reopen once todoModal closes
+let progressSaveTimers = {};
+
+/* ---------------------------------------------------------------- */
+/* Date helpers                                                       */
+/* ---------------------------------------------------------------- */
+function startOfDay(d){ const x = new Date(d); x.setHours(0,0,0,0); return x; }
+function addDays(d,n){ const x = new Date(d); x.setDate(x.getDate()+n); return x; }
+function addMonths(d,n){ const x = new Date(d); x.setMonth(x.getMonth()+n); return x; }
+function startOfWeek(d){ const x = startOfDay(d); x.setDate(x.getDate()-x.getDay()); return x; }
+function startOfMonth(d){ return new Date(d.getFullYear(), d.getMonth(), 1); }
+function endOfMonth(d){ return new Date(d.getFullYear(), d.getMonth()+1, 0); }
+function toISO(d){
+  const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), day=String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+function fromISO(s){
+  if(!s) return startOfDay(new Date());
+  const [y,m,d] = s.split('-').map(Number);
+  return new Date(y, m-1, d);
+}
+const WEEKDAY_JP = ['日','月','火','水','木','金','土'];
+function formatDisplayDate(iso){
+  const d = fromISO(iso);
+  return `${d.getMonth()+1}/${d.getDate()} (${WEEKDAY_JP[d.getDay()]})`;
+}
+
+/* ---------------------------------------------------------------- */
+/* Persistence: localStorage + Firestore fallback                     */
+/* ---------------------------------------------------------------- */
+function saveLocalCache(){
+  try { localStorage.setItem(LOCAL_KEY, JSON.stringify(db)); } catch(e){ console.error(e); }
+}
+function loadLocalCache(){
+  try {
+    const raw = localStorage.getItem(LOCAL_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      db = {
+        todos: parsed.todos || [],
+        genres: (parsed.genres && parsed.genres.length) ? parsed.genres : defaultGenres(),
+        workspaces: (parsed.workspaces && parsed.workspaces.length) ? parsed.workspaces : defaultWorkspaces()
+      };
+    }
+  } catch(e){ console.error(e); }
+  migrateTodos();
+}
+function migrateTodos(){
+  const fallback = db.workspaces[0] ? db.workspaces[0].id : null;
+  db.todos.forEach(t => { if (!t.workspaceId) t.workspaceId = fallback; });
+}
+function ensureActiveWorkspaceValid(){
+  if (!ui.activeWorkspace || !db.workspaces.find(w => w.id === ui.activeWorkspace)) {
+    ui.activeWorkspace = db.workspaces[0] ? db.workspaces[0].id : null;
+  }
+}
+function savePrefs(){
+  try {
+    localStorage.setItem(PREF_KEY, JSON.stringify({
+      colorTheme: ui.colorTheme, fontSize: ui.fontSize, fontFamily: ui.fontFamily,
+      viewMode: ui.viewMode, listTab: ui.listTab, calendarPeriod: ui.calendarPeriod,
+      genreFilter: ui.genreFilter, activeWorkspace: ui.activeWorkspace
+    }));
+  } catch(e){}
+}
+function loadPrefs(){
+  let raw = null;
+  try { raw = localStorage.getItem(PREF_KEY); } catch(e){}
+  if (raw) {
+    try {
+      const p = JSON.parse(raw);
+      ui.colorTheme = p.colorTheme || null;
+      ui.fontSize = p.fontSize || 'standard';
+      ui.fontFamily = p.fontFamily || 'gothic';
+      ui.viewMode = p.viewMode || 'list';
+      ui.listTab = p.listTab || 'daily';
+      ui.calendarPeriod = p.calendarPeriod || '1month';
+      ui.genreFilter = p.genreFilter || 'all';
+      ui.activeWorkspace = p.activeWorkspace || null;
+    } catch(e){}
+  }
+  if (!ui.colorTheme) {
+    ui.colorTheme = (window.matchMedia && matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+  }
+}
+
+let saveTimer = null;
+function persist(){
+  saveLocalCache();
+  renderAll();
+  if (firestoreDb) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(pushToFirestore, 400);
+  }
+}
+
+/* ---------------------------------------------------------------- */
+/* Firebase (compat SDK, loaded on demand)                            */
+/* ---------------------------------------------------------------- */
+let firebaseApp = null;
+let firestoreDb = null;
+let firestoreUnsub = null;
+let scriptsLoaded = false;
+let applyingRemote = false;
+
+function loadScript(src){
+  return new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('スクリプトの読み込みに失敗しました: ' + src));
+    document.head.appendChild(s);
+  });
+}
+async function ensureFirebaseScripts(){
+  if (scriptsLoaded) return;
+  await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
+  await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
+  scriptsLoaded = true;
+}
+
+function parseFirebaseConfigInput(raw){
+  let text = (raw || '').trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start === -1 || end === -1 || end < start) throw new Error('設定オブジェクトが見つかりませんでした');
+  text = text.slice(start, end + 1);
+  text = text.replace(/\/\/.*$/gm, '');
+  text = text.replace(/,\s*([}\]])/g, '$1');
+  text = text.replace(/([{,]\s*)([A-Za-z_$][A-Za-z0-9_$]*)\s*:/g, '$1"$2":');
+  text = text.replace(/'([^'\\]*)'/g, '"$1"');
+  const obj = JSON.parse(text);
+  if (!obj.apiKey || !obj.projectId) throw new Error('apiKey と projectId が必要です');
+  return obj;
+}
+
+function setSyncStatus(mode, message){
+  const btn = document.getElementById('syncBtn');
+  btn.classList.remove('connected','errored');
+  const statusEl = document.getElementById('syncStatus');
+  const textEl = document.getElementById('syncStatusText');
+  const disconnectBtn = document.getElementById('disconnectSyncBtn');
+  statusEl.classList.remove('on','error');
+  if (mode === 'on') {
+    btn.classList.add('connected');
+    statusEl.classList.add('on');
+    textEl.textContent = 'オンライン — リアルタイム同期中';
+    disconnectBtn.hidden = false;
+  } else if (mode === 'error') {
+    btn.classList.add('errored');
+    statusEl.classList.add('error');
+    textEl.textContent = '接続エラー: ' + (message || '不明なエラー');
+    disconnectBtn.hidden = !hasStoredConfig();
+  } else {
+    textEl.textContent = 'オフライン（このデバイスのみに保存）';
+    disconnectBtn.hidden = !hasStoredConfig();
+  }
+}
+function hasStoredConfig(){
+  try { return !!localStorage.getItem(CONFIG_KEY); } catch(e){ return false; }
+}
+
+async function connectFirebase(config, {silent} = {}){
+  try {
+    await ensureFirebaseScripts();
+    if (firestoreUnsub) { firestoreUnsub(); firestoreUnsub = null; }
+    if (firebaseApp) { try { await firebaseApp.delete(); } catch(e){} firebaseApp = null; }
+    firebaseApp = firebase.initializeApp(config, 'todoapp-' + Date.now());
+    firestoreDb = firebase.firestore(firebaseApp);
+    try { firestoreDb.enablePersistence({ synchronizeTabs: true }).catch(()=>{}); } catch(e){}
+
+    firestoreUnsub = firestoreDb.collection('todoAppData').doc('main').onSnapshot(
+      (snap) => {
+        setSyncStatus('on');
+        if (snap.exists) {
+          const data = snap.data();
+          applyingRemote = true;
+          db = {
+            todos: data.todos || [],
+            genres: (data.genres && data.genres.length) ? data.genres : defaultGenres(),
+            workspaces: (data.workspaces && data.workspaces.length) ? data.workspaces : defaultWorkspaces()
+          };
+          migrateTodos();
+          ensureActiveWorkspaceValid();
+          saveLocalCache();
+          renderAll();
+          applyingRemote = false;
+        } else {
+          pushToFirestore();
+        }
+      },
+      (err) => {
+        console.error(err);
+        setSyncStatus('error', err.message);
+      }
+    );
+    if (!silent) showToast('Firebaseに接続しました');
+  } catch(e) {
+    console.error(e);
+    setSyncStatus('error', e.message);
+    firestoreDb = null;
+    if (!silent) showToast('接続に失敗しました: ' + e.message);
+    throw e;
+  }
+}
+
+function pushToFirestore(){
+  if (!firestoreDb || applyingRemote) return;
+  firestoreDb.collection('todoAppData').doc('main')
+    .set({ todos: db.todos, genres: db.genres, workspaces: db.workspaces, updatedAt: Date.now() })
+    .catch((e) => { console.error(e); setSyncStatus('error', e.message); });
+}
+
+function disconnectFirebase(){
+  if (firestoreUnsub) { firestoreUnsub(); firestoreUnsub = null; }
+  if (firebaseApp) { try { firebaseApp.delete(); } catch(e){} firebaseApp = null; }
+  firestoreDb = null;
+  try { localStorage.removeItem(CONFIG_KEY); } catch(e){}
+  setSyncStatus('off');
+  document.getElementById('disconnectSyncBtn').hidden = true;
+  showToast('オフラインに戻しました');
+}
+
+/* ---------------------------------------------------------------- */
+/* Data helpers                                                       */
+/* ---------------------------------------------------------------- */
+function uid(){
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2);
+}
+function getGenre(id){ return db.genres.find(g => g.id === id) || null; }
+function getWorkspace(id){ return db.workspaces.find(w => w.id === id) || null; }
+function genreColor(id){
+  if (!id) return '#8e8e93';
+  let hash = 0;
+  for (let i=0;i<id.length;i++){ hash = (hash*31 + id.charCodeAt(i)) >>> 0; }
+  return GENRE_COLORS[hash % GENRE_COLORS.length];
+}
+function visibleTodos(){
+  let items = db.todos.filter(t => t.workspaceId === ui.activeWorkspace);
+  if (ui.genreFilter === 'none') items = items.filter(t => !t.genreId || !getGenre(t.genreId));
+  else if (ui.genreFilter !== 'all') items = items.filter(t => t.genreId === ui.genreFilter);
+  return items;
+}
+function escapeHtml(s){
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+function escapeAttr(s){ return escapeHtml(s); }
+
+/* ---------------------------------------------------------------- */
+/* Rendering: top chrome                                              */
+/* ---------------------------------------------------------------- */
+function renderWorkspaceBar(){
+  const bar = document.getElementById('workspaceBar');
+  let html = db.workspaces.map(w =>
+    `<button class="ws-tab ${ui.activeWorkspace===w.id?'active':''}" data-ws="${escapeAttr(w.id)}">${escapeHtml(w.name)}</button>`
+  ).join('');
+  html += `<button class="ws-tab ws-manage" id="manageWorkspacesBtn" title="ワークスペース管理"><i class="fa-solid fa-gear"></i></button>`;
+  bar.innerHTML = html;
+}
+function renderGenreBar(){
+  const bar = document.getElementById('genreBar');
+  let html = `<button class="chip ${ui.genreFilter==='all'?'active':''}" data-genre="all">すべて</button>`;
+  db.genres.forEach(g => {
+    html += `<button class="chip ${ui.genreFilter===g.id?'active':''}" data-genre="${escapeAttr(g.id)}" style="--dot:${genreColor(g.id)}"><span class="dot"></span>${escapeHtml(g.name)}</button>`;
+  });
+  html += `<button class="chip chip-manage" id="manageGenresBtn" title="ジャンル管理"><i class="fa-solid fa-gear"></i></button>`;
+  bar.innerHTML = html;
+}
+
+function renderControls(){
+  document.querySelectorAll('#viewToggle .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.view === ui.viewMode));
+  document.getElementById('listTabs').hidden = ui.viewMode !== 'list';
+  document.getElementById('calendarPeriodSelect').hidden = ui.viewMode !== 'calendar';
+  document.querySelectorAll('#listTabs .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === ui.listTab));
+  document.getElementById('calendarPeriodSelect').value = ui.calendarPeriod;
+}
+
+function renderNavLabel(){
+  const label = document.getElementById('navLabel');
+  const d = ui.refDate;
+  if (ui.viewMode === 'list') {
+    if (ui.listTab === 'daily') {
+      label.textContent = `${d.getFullYear()}年${d.getMonth()+1}月${d.getDate()}日 (${WEEKDAY_JP[d.getDay()]})`;
+    } else if (ui.listTab === 'weekly') {
+      const s = startOfWeek(d), e = addDays(s,6);
+      label.textContent = `${s.getMonth()+1}/${s.getDate()} – ${e.getMonth()+1}/${e.getDate()}`;
+    } else {
+      label.textContent = `${d.getFullYear()}年${d.getMonth()+1}月`;
+    }
+  } else {
+    const n = periodMonthsOrWeeks();
+    if (n.unit === 'week') {
+      const s = startOfWeek(d), e = addDays(s, n.count*7 - 1);
+      label.textContent = `${s.getFullYear()}/${s.getMonth()+1}/${s.getDate()} – ${e.getMonth()+1}/${e.getDate()}`;
+    } else {
+      if (n.count === 1) {
+        label.textContent = `${d.getFullYear()}年${d.getMonth()+1}月`;
+      } else {
+        const e = addMonths(d, n.count-1);
+        label.textContent = `${d.getFullYear()}年${d.getMonth()+1}月 – ${e.getFullYear()}年${e.getMonth()+1}月`;
+      }
+    }
+  }
+}
+
+function periodMonthsOrWeeks(){
+  const p = ui.calendarPeriod;
+  if (p.endsWith('week')) return { unit:'week', count: parseInt(p) };
+  return { unit:'month', count: parseInt(p) };
+}
+
+/* ---------------------------------------------------------------- */
+/* Rendering: list view                                                */
+/* ---------------------------------------------------------------- */
+function renderListView(){
+  const container = document.getElementById('listView');
+  container.classList.toggle('weekly-mode', ui.listTab === 'weekly');
+  const items = visibleTodos();
+  let filtered, grouped = null;
+
+  if (ui.listTab === 'daily') {
+    const iso = toISO(ui.refDate);
+    filtered = items.filter(t => t.date === iso);
+  } else if (ui.listTab === 'weekly') {
+    const s = startOfWeek(ui.refDate), e = addDays(s,6);
+    filtered = items.filter(t => { const dt = fromISO(t.date); return dt>=s && dt<=e; });
+    grouped = true;
+  } else {
+    filtered = items.filter(t => {
+      const dt = fromISO(t.date);
+      return dt.getFullYear()===ui.refDate.getFullYear() && dt.getMonth()===ui.refDate.getMonth();
+    });
+    grouped = true;
+  }
+
+  filtered = filtered.slice().sort((a,b) => {
+    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
+    if (a.done !== b.done) return a.done ? 1 : -1;
+    return a.title.localeCompare(b.title, 'ja');
+  });
+
+  if (filtered.length === 0) {
+    container.innerHTML = `<div class="empty-state"><i class="fa-regular fa-circle-check"></i>この期間のToDoはありません</div>`;
+    return;
+  }
+
+  if (!grouped) {
+    container.innerHTML = filtered.map(renderTodoItem).join('');
+  } else {
+    const byDate = {};
+    filtered.forEach(t => { (byDate[t.date] = byDate[t.date] || []).push(t); });
+    const dates = Object.keys(byDate).sort();
+    container.innerHTML = dates.map(iso => `
+      <div class="day-group">
+        <div class="day-group-title">${formatDisplayDate(iso)}</div>
+        ${byDate[iso].map(renderTodoItem).join('')}
+      </div>
+    `).join('');
+  }
+}
+
+function renderTodoItem(todo){
+  const genre = getGenre(todo.genreId);
+  return `
+  <div class="todo-item ${todo.done?'done':''}" data-id="${todo.id}">
+    <div class="todo-main">
+      <button class="check-btn" data-action="toggle" data-id="${todo.id}"><i class="fa-${todo.done?'solid fa-circle-check':'regular fa-circle'}"></i></button>
+      <div class="todo-content">
+        <div class="todo-title-row">
+          <span class="todo-title" data-action="edit" data-id="${todo.id}">${escapeHtml(todo.title)}</span>
+          ${genre ? `<span class="genre-badge" style="--gc:${genreColor(genre.id)}">${escapeHtml(genre.name)}</span>` : ''}
+        </div>
+        <div class="todo-date">${formatDisplayDate(todo.date)}</div>
+        <textarea class="progress-input" data-id="${todo.id}" placeholder="進捗メモを入力...">${escapeHtml(todo.progress||'')}</textarea>
+      </div>
+      <button class="icon-btn danger" data-action="delete" data-id="${todo.id}" title="削除"><i class="fa-solid fa-trash"></i></button>
+    </div>
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- */
+/* Rendering: calendar view                                            */
+/* ---------------------------------------------------------------- */
+function renderCalendarView(){
+  const container = document.getElementById('calendarView');
+  const n = periodMonthsOrWeeks();
+  const items = visibleTodos();
+  const todosByDate = {};
+  items.forEach(t => { (todosByDate[t.date] = todosByDate[t.date] || []).push(t); });
+  const todayIso = toISO(startOfDay(new Date()));
+
+  let html = '';
+  if (n.unit === 'week') {
+    const start = startOfWeek(ui.refDate);
+    const totalDays = n.count * 7;
+    html += weekdayRow();
+    html += `<div class="cal-grid">`;
+    for (let i=0;i<totalDays;i++){
+      const d = addDays(start, i);
+      html += calCell(d, todosByDate, todayIso, false);
+    }
+    html += `</div>`;
+  } else {
+    for (let m=0; m<n.count; m++){
+      const monthDate = addMonths(startOfMonth(ui.refDate), m);
+      const gridStart = startOfWeek(startOfMonth(monthDate));
+      const gridEnd = addDays(startOfWeek(endOfMonth(monthDate)), 6);
+      const days = [];
+      let cur = gridStart;
+      while (cur <= gridEnd){ days.push(cur); cur = addDays(cur,1); }
+      html += `<div class="month-block">
+        <div class="month-title">${monthDate.getFullYear()}年${monthDate.getMonth()+1}月</div>
+        ${weekdayRow()}
+        <div class="cal-grid">
+          ${days.map(d => calCell(d, todosByDate, todayIso, d.getMonth() !== monthDate.getMonth())).join('')}
+        </div>
+      </div>`;
+    }
+  }
+  container.innerHTML = html;
+}
+
+function weekdayRow(){
+  return `<div class="weekday-row">${WEEKDAY_JP.map(w=>`<span>${w}</span>`).join('')}</div>`;
+}
+
+function calCell(d, todosByDate, todayIso, isPad){
+  const iso = toISO(d);
+  const dayTodos = (todosByDate[iso] || []).slice().sort((a,b)=> (a.done - b.done) || a.title.localeCompare(b.title,'ja'));
+  const isToday = iso === todayIso;
+  const maxShow = 3;
+  const chips = dayTodos.slice(0, maxShow).map(t => {
+    const c = genreColor(t.genreId);
+    return `<span class="cal-chip ${t.done?'done':''}" style="--gc:${c}">${escapeHtml(t.title)}</span>`;
+  }).join('');
+  const more = dayTodos.length > maxShow ? `<span class="cal-more">+${dayTodos.length - maxShow}件</span>` : '';
+  return `<div class="cal-cell ${isPad?'pad':''} ${isToday?'today':''}" data-date="${iso}">
+    <span class="cal-daynum">${d.getDate()}</span>
+    ${chips}${more}
+  </div>`;
+}
+
+/* ---------------------------------------------------------------- */
+/* Render orchestration                                               */
+/* ---------------------------------------------------------------- */
+function renderAll(){
+  renderWorkspaceBar();
+  renderGenreBar();
+  renderControls();
+  renderNavLabel();
+  document.getElementById('listView').hidden = ui.viewMode !== 'list';
+  document.getElementById('calendarView').hidden = ui.viewMode !== 'calendar';
+  if (ui.viewMode === 'list') renderListView(); else renderCalendarView();
+  if (!document.getElementById('dayModal').hidden && dayModalDate) renderDayModalBody();
+}
+
+/* ---------------------------------------------------------------- */
+/* Todo CRUD                                                           */
+/* ---------------------------------------------------------------- */
+function addTodo({ title, date, workspaceId, genreId, progress, done }){
+  const todo = {
+    id: uid(), title: title.trim(), date,
+    workspaceId: workspaceId || ui.activeWorkspace,
+    genreId: genreId || null, progress: progress || '', done: !!done, createdAt: Date.now()
+  };
+  db.todos.push(todo);
+  persist();
+  return todo;
+}
+function updateTodo(id, patch){
+  const t = db.todos.find(x => x.id === id);
+  if (!t) return;
+  Object.assign(t, patch);
+  persist();
+}
+function deleteTodo(id){
+  db.todos = db.todos.filter(x => x.id !== id);
+  persist();
+}
+function toggleTodo(id){
+  const t = db.todos.find(x => x.id === id);
+  if (!t) return;
+  t.done = !t.done;
+  persist();
+}
+
+/* ---------------------------------------------------------------- */
+/* Todo modal                                                          */
+/* ---------------------------------------------------------------- */
+function populateGenreSelect(select, selectedId){
+  select.innerHTML = `<option value="">未分類</option>` + db.genres.map(g => `<option value="${escapeAttr(g.id)}">${escapeHtml(g.name)}</option>`).join('');
+  select.value = selectedId || '';
+}
+function populateWorkspaceSelect(select, selectedId){
+  select.innerHTML = db.workspaces.map(w => `<option value="${escapeAttr(w.id)}">${escapeHtml(w.name)}</option>`).join('');
+  select.value = selectedId || ui.activeWorkspace || '';
+}
+function hideDayModalIfOpenFor(){
+  const dm = document.getElementById('dayModal');
+  if (!dm.hidden) {
+    pendingReturnToDay = dayModalDate;
+    dm.hidden = true;
+  }
+}
+function openTodoModal(defaults){
+  hideDayModalIfOpenFor();
+  editingTodoId = null;
+  document.getElementById('todoModalTitle').textContent = '新規ToDo';
+  document.getElementById('todoDeleteBtn').hidden = true;
+  document.getElementById('todoTitleInput').value = '';
+  document.getElementById('todoDateInput').value = defaults && defaults.date ? defaults.date : toISO(ui.refDate);
+  populateWorkspaceSelect(document.getElementById('todoWorkspaceInput'), defaults && defaults.workspaceId);
+  populateGenreSelect(document.getElementById('todoGenreInput'), defaults && defaults.genreId);
+  document.getElementById('todoDoneInput').checked = false;
+  document.getElementById('todoProgressInput').value = '';
+  document.getElementById('todoModal').hidden = false;
+  setTimeout(() => document.getElementById('todoTitleInput').focus(), 50);
+}
+function openTodoModalForEdit(id){
+  const t = db.todos.find(x => x.id === id);
+  if (!t) return;
+  hideDayModalIfOpenFor();
+  editingTodoId = id;
+  document.getElementById('todoModalTitle').textContent = 'ToDoを編集';
+  document.getElementById('todoDeleteBtn').hidden = false;
+  document.getElementById('todoTitleInput').value = t.title;
+  document.getElementById('todoDateInput').value = t.date;
+  populateWorkspaceSelect(document.getElementById('todoWorkspaceInput'), t.workspaceId);
+  populateGenreSelect(document.getElementById('todoGenreInput'), t.genreId);
+  document.getElementById('todoDoneInput').checked = t.done;
+  document.getElementById('todoProgressInput').value = t.progress || '';
+  document.getElementById('todoModal').hidden = false;
+}
+function closeTodoModal(){
+  document.getElementById('todoModal').hidden = true;
+  editingTodoId = null;
+  if (pendingReturnToDay) {
+    const d = pendingReturnToDay;
+    pendingReturnToDay = null;
+    openDayModal(d);
+  }
+}
+function saveTodoModal(){
+  const title = document.getElementById('todoTitleInput').value.trim();
+  if (!title) { showToast('タイトルを入力してください'); return; }
+  const date = document.getElementById('todoDateInput').value || toISO(ui.refDate);
+  const workspaceId = document.getElementById('todoWorkspaceInput').value || ui.activeWorkspace;
+  const genreId = document.getElementById('todoGenreInput').value || null;
+  const progress = document.getElementById('todoProgressInput').value;
+  const done = document.getElementById('todoDoneInput').checked;
+  if (editingTodoId) {
+    updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done });
+  } else {
+    addTodo({ title, date, workspaceId, genreId, progress, done });
+  }
+  closeTodoModal();
+}
+
+/* ---------------------------------------------------------------- */
+/* Day modal (calendar cell tap)                                       */
+/* ---------------------------------------------------------------- */
+function openDayModal(iso){
+  dayModalDate = iso;
+  document.getElementById('dayModalTitle').textContent = formatDisplayDate(iso);
+  renderDayModalBody();
+  document.getElementById('dayModal').hidden = false;
+}
+function renderDayModalBody(){
+  const body = document.getElementById('dayModalBody');
+  const items = visibleTodos().filter(t => t.date === dayModalDate)
+    .sort((a,b)=> (a.done-b.done) || a.title.localeCompare(b.title,'ja'));
+  if (items.length === 0) {
+    body.innerHTML = `<div class="empty-state"><i class="fa-regular fa-circle-check"></i>この日のToDoはありません</div>`;
+  } else {
+    body.innerHTML = items.map(renderTodoItem).join('');
+  }
+}
+function closeDayModal(){
+  document.getElementById('dayModal').hidden = true;
+  dayModalDate = null;
+  pendingReturnToDay = null;
+}
+
+/* ---------------------------------------------------------------- */
+/* Genre modal                                                         */
+/* ---------------------------------------------------------------- */
+function renderGenreModal(){
+  const list = document.getElementById('genreList');
+  list.innerHTML = db.genres.map(g => `
+    <div class="item-row" data-id="${g.id}">
+      <span class="dot" style="--gc:${genreColor(g.id)}"></span>
+      <input type="text" value="${escapeAttr(g.name)}" data-action="rename-genre" data-id="${g.id}">
+      <button data-action="remove-genre" data-id="${g.id}"><i class="fa-solid fa-trash"></i></button>
+    </div>
+  `).join('') || `<div class="empty-state" style="padding:1.5rem;">ジャンルがありません</div>`;
+}
+function openGenreModal(){ renderGenreModal(); document.getElementById('genreModal').hidden = false; }
+function closeGenreModal(){ document.getElementById('genreModal').hidden = true; renderGenreBar(); }
+
+/* ---------------------------------------------------------------- */
+/* Workspace modal                                                     */
+/* ---------------------------------------------------------------- */
+function renderWorkspaceModal(){
+  const list = document.getElementById('workspaceList');
+  list.innerHTML = db.workspaces.map(w => `
+    <div class="item-row" data-id="${w.id}">
+      <span class="dot" style="--gc:${genreColor(w.id)}"></span>
+      <input type="text" value="${escapeAttr(w.name)}" data-action="rename-ws" data-id="${w.id}">
+      <button data-action="remove-ws" data-id="${w.id}"><i class="fa-solid fa-trash"></i></button>
+    </div>
+  `).join('') || `<div class="empty-state" style="padding:1.5rem;">ワークスペースがありません</div>`;
+}
+function openWorkspaceModal(){ renderWorkspaceModal(); document.getElementById('workspaceModal').hidden = false; }
+function closeWorkspaceModal(){ document.getElementById('workspaceModal').hidden = true; renderWorkspaceBar(); }
+
+/* ---------------------------------------------------------------- */
+/* Settings modal                                                      */
+/* ---------------------------------------------------------------- */
+function applySettings(){
+  document.documentElement.setAttribute('data-theme', ui.colorTheme);
+  document.documentElement.setAttribute('data-fontsize', ui.fontSize);
+  document.documentElement.setAttribute('data-font', ui.fontFamily);
+}
+function renderSettingsModal(){
+  document.querySelectorAll('#fontSizeOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.fontSize));
+  document.querySelectorAll('#colorThemeOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.colorTheme));
+  document.querySelectorAll('#fontFamilyOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.fontFamily));
+}
+function openSettingsModal(){ renderSettingsModal(); document.getElementById('settingsModal').hidden = false; }
+function closeSettingsModal(){ document.getElementById('settingsModal').hidden = true; }
+
+/* ---------------------------------------------------------------- */
+/* Sync modal                                                          */
+/* ---------------------------------------------------------------- */
+function openSyncModal(){
+  document.getElementById('disconnectSyncBtn').hidden = !hasStoredConfig();
+  document.getElementById('syncModal').hidden = false;
+}
+function closeSyncModal(){ document.getElementById('syncModal').hidden = true; }
+
+/* ---------------------------------------------------------------- */
+/* Toast                                                               */
+/* ---------------------------------------------------------------- */
+let toastTimer = null;
+function showToast(msg){
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 2400);
+}
+
+/* ---------------------------------------------------------------- */
+/* Navigation                                                          */
+/* ---------------------------------------------------------------- */
+function navPrev(){ navShift(-1); }
+function navNext(){ navShift(1); }
+function navShift(dir){
+  if (ui.viewMode === 'list') {
+    if (ui.listTab === 'daily') ui.refDate = addDays(ui.refDate, dir);
+    else if (ui.listTab === 'weekly') ui.refDate = addDays(ui.refDate, dir*7);
+    else ui.refDate = addMonths(ui.refDate, dir);
+  } else {
+    const n = periodMonthsOrWeeks();
+    if (n.unit === 'week') ui.refDate = addDays(ui.refDate, dir*n.count*7);
+    else ui.refDate = addMonths(ui.refDate, dir*n.count);
+  }
+  renderNavLabel();
+  if (ui.viewMode === 'list') renderListView(); else renderCalendarView();
+}
+function navToday(){
+  ui.refDate = startOfDay(new Date());
+  renderNavLabel();
+  if (ui.viewMode === 'list') renderListView(); else renderCalendarView();
+}
+
+/* ---------------------------------------------------------------- */
+/* Event wiring                                                        */
+/* ---------------------------------------------------------------- */
+function wireEvents(){
+  document.getElementById('settingsBtn').addEventListener('click', openSettingsModal);
+  document.getElementById('syncBtn').addEventListener('click', openSyncModal);
+
+  document.getElementById('viewToggle').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-view]');
+    if (!btn) return;
+    ui.viewMode = btn.dataset.view;
+    savePrefs();
+    renderAll();
+  });
+  document.getElementById('listTabs').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-tab]');
+    if (!btn) return;
+    ui.listTab = btn.dataset.tab;
+    savePrefs();
+    renderAll();
+  });
+  document.getElementById('calendarPeriodSelect').addEventListener('change', (e) => {
+    ui.calendarPeriod = e.target.value;
+    savePrefs();
+    renderAll();
+  });
+
+  document.getElementById('prevBtn').addEventListener('click', navPrev);
+  document.getElementById('nextBtn').addEventListener('click', navNext);
+  document.getElementById('todayBtn').addEventListener('click', navToday);
+
+  document.getElementById('workspaceBar').addEventListener('click', (e) => {
+    if (e.target.closest('#manageWorkspacesBtn')) { openWorkspaceModal(); return; }
+    const tab = e.target.closest('.ws-tab[data-ws]');
+    if (!tab) return;
+    ui.activeWorkspace = tab.dataset.ws;
+    savePrefs();
+    renderAll();
+  });
+
+  document.getElementById('genreBar').addEventListener('click', (e) => {
+    if (e.target.closest('#manageGenresBtn')) { openGenreModal(); return; }
+    const chip = e.target.closest('button[data-genre]');
+    if (!chip) return;
+    ui.genreFilter = chip.dataset.genre;
+    savePrefs();
+    renderAll();
+  });
+
+  document.getElementById('addTodoBtn').addEventListener('click', () => openTodoModal());
+
+  // Todo modal
+  document.getElementById('todoModalCancel').addEventListener('click', closeTodoModal);
+  document.getElementById('todoModalSave').addEventListener('click', saveTodoModal);
+  document.getElementById('todoDeleteBtn').addEventListener('click', () => {
+    if (editingTodoId && confirm('このToDoを削除しますか？')) {
+      const id = editingTodoId;
+      deleteTodo(id);
+      closeTodoModal();
+    }
+  });
+  document.getElementById('todoModal').addEventListener('click', (e) => {
+    if (e.target.id === 'todoModal') closeTodoModal();
+  });
+
+  // Day modal
+  document.getElementById('dayModalClose').addEventListener('click', closeDayModal);
+  document.getElementById('dayModalAdd').addEventListener('click', () => {
+    if (dayModalDate) openTodoModal({ date: dayModalDate });
+  });
+  document.getElementById('dayModal').addEventListener('click', (e) => {
+    if (e.target.id === 'dayModal') closeDayModal();
+  });
+
+  // Genre modal
+  document.getElementById('genreModalClose').addEventListener('click', closeGenreModal);
+  document.getElementById('genreModal').addEventListener('click', (e) => {
+    if (e.target.id === 'genreModal') closeGenreModal();
+  });
+  document.getElementById('addGenreBtn').addEventListener('click', () => {
+    const input = document.getElementById('newGenreInput');
+    const name = input.value.trim();
+    if (!name) return;
+    db.genres.push({ id: uid(), name });
+    input.value = '';
+    persist();
+    renderGenreModal();
+  });
+  document.getElementById('genreList').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action="remove-genre"]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    const g = getGenre(id);
+    if (!g) return;
+    if (confirm(`「${g.name}」を削除しますか？このジャンルのToDoは未分類になります。`)) {
+      db.genres = db.genres.filter(x => x.id !== id);
+      db.todos.forEach(t => { if (t.genreId === id) t.genreId = null; });
+      if (ui.genreFilter === id) ui.genreFilter = 'all';
+      persist();
+      renderGenreModal();
+    }
+  });
+  document.getElementById('genreList').addEventListener('change', (e) => {
+    const input = e.target.closest('input[data-action="rename-genre"]');
+    if (!input) return;
+    const g = getGenre(input.dataset.id);
+    if (!g) return;
+    const name = input.value.trim();
+    if (name) { g.name = name; persist(); }
+    else input.value = g.name;
+  });
+
+  // Workspace modal
+  document.getElementById('workspaceModalClose').addEventListener('click', closeWorkspaceModal);
+  document.getElementById('workspaceModal').addEventListener('click', (e) => {
+    if (e.target.id === 'workspaceModal') closeWorkspaceModal();
+  });
+  document.getElementById('addWorkspaceBtn').addEventListener('click', () => {
+    const input = document.getElementById('newWorkspaceInput');
+    const name = input.value.trim();
+    if (!name) return;
+    db.workspaces.push({ id: uid(), name });
+    input.value = '';
+    persist();
+    renderWorkspaceModal();
+  });
+  document.getElementById('workspaceList').addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-action="remove-ws"]');
+    if (!btn) return;
+    if (db.workspaces.length <= 1) { showToast('最後のワークスペースは削除できません'); return; }
+    const id = btn.dataset.id;
+    const w = getWorkspace(id);
+    if (!w) return;
+    if (confirm(`「${w.name}」を削除しますか？このワークスペースのToDoは他のワークスペースに移動されます。`)) {
+      db.workspaces = db.workspaces.filter(x => x.id !== id);
+      const fallback = db.workspaces[0].id;
+      db.todos.forEach(t => { if (t.workspaceId === id) t.workspaceId = fallback; });
+      ensureActiveWorkspaceValid();
+      savePrefs();
+      persist();
+      renderWorkspaceModal();
+    }
+  });
+  document.getElementById('workspaceList').addEventListener('change', (e) => {
+    const input = e.target.closest('input[data-action="rename-ws"]');
+    if (!input) return;
+    const w = getWorkspace(input.dataset.id);
+    if (!w) return;
+    const name = input.value.trim();
+    if (name) { w.name = name; persist(); }
+    else input.value = w.name;
+  });
+
+  // Settings modal
+  document.getElementById('settingsModalClose').addEventListener('click', closeSettingsModal);
+  document.getElementById('settingsModal').addEventListener('click', (e) => {
+    if (e.target.id === 'settingsModal') closeSettingsModal();
+  });
+  document.getElementById('fontSizeOptions').addEventListener('click', (e) => {
+    const btn = e.target.closest('.option-btn'); if (!btn) return;
+    ui.fontSize = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
+  });
+  document.getElementById('colorThemeOptions').addEventListener('click', (e) => {
+    const btn = e.target.closest('.option-btn'); if (!btn) return;
+    ui.colorTheme = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
+  });
+  document.getElementById('fontFamilyOptions').addEventListener('click', (e) => {
+    const btn = e.target.closest('.option-btn'); if (!btn) return;
+    ui.fontFamily = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
+  });
+
+  // Sync modal
+  document.getElementById('syncModalClose').addEventListener('click', closeSyncModal);
+  document.getElementById('syncModal').addEventListener('click', (e) => {
+    if (e.target.id === 'syncModal') closeSyncModal();
+  });
+  document.getElementById('saveSyncBtn').addEventListener('click', async () => {
+    const raw = document.getElementById('firebaseConfigInput').value;
+    let config;
+    try { config = parseFirebaseConfigInput(raw); }
+    catch (e) { showToast('設定の読み取りに失敗: ' + e.message); return; }
+    try {
+      localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+      await connectFirebase(config);
+    } catch(e) { /* status already shown */ }
+  });
+  document.getElementById('disconnectSyncBtn').addEventListener('click', () => {
+    if (confirm('同期を解除してオフラインモードに戻しますか？')) disconnectFirebase();
+  });
+
+  // Delegated events for todo items rendered in list / day modal
+  document.addEventListener('click', (e) => {
+    const toggleBtn = e.target.closest('[data-action="toggle"]');
+    if (toggleBtn) { toggleTodo(toggleBtn.dataset.id); return; }
+    const deleteBtn = e.target.closest('[data-action="delete"]');
+    if (deleteBtn) {
+      if (confirm('このToDoを削除しますか？')) deleteTodo(deleteBtn.dataset.id);
+      return;
+    }
+    const editTarget = e.target.closest('[data-action="edit"]');
+    if (editTarget) { openTodoModalForEdit(editTarget.dataset.id); return; }
+    const cell = e.target.closest('.cal-cell');
+    if (cell && cell.dataset.date) { openDayModal(cell.dataset.date); return; }
+  });
+
+  document.addEventListener('input', (e) => {
+    const ta = e.target.closest('.progress-input');
+    if (!ta) return;
+    const id = ta.dataset.id;
+    clearTimeout(progressSaveTimers[id]);
+    progressSaveTimers[id] = setTimeout(() => {
+      const t = db.todos.find(x => x.id === id);
+      if (t && t.progress !== ta.value) { t.progress = ta.value; persist(); }
+    }, 500);
+  });
+  // avoid losing focus/caret on full re-render while typing progress notes
+  document.addEventListener('focusout', (e) => {
+    const ta = e.target.closest('.progress-input');
+    if (!ta) return;
+    const id = ta.dataset.id;
+    clearTimeout(progressSaveTimers[id]);
+    const t = db.todos.find(x => x.id === id);
+    if (t && t.progress !== ta.value) { t.progress = ta.value; persist(); }
+  });
+}
+
+/* ---------------------------------------------------------------- */
+/* Init                                                                */
+/* ---------------------------------------------------------------- */
+function init(){
+  loadPrefs();
+  loadLocalCache();
+  ensureActiveWorkspaceValid();
+  applySettings();
+  wireEvents();
+  renderAll();
+
+  try {
+    const raw = localStorage.getItem(CONFIG_KEY);
+    if (raw) {
+      const config = JSON.parse(raw);
+      connectFirebase(config, { silent: true }).catch(() => {});
+    } else {
+      setSyncStatus('off');
+    }
+  } catch(e) { setSyncStatus('off'); }
+}
+
+document.addEventListener('DOMContentLoaded', init);
+})();
+</script>
+</body>
+</html>
