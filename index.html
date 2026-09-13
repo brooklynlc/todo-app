@@ -323,6 +323,27 @@ main{
 }
 .option-btn.active{background:var(--accent); color:var(--accent-text); border-color:var(--accent);}
 
+.tabvis-row{
+  display:flex; align-items:center; gap:0.625rem; background:var(--bg-elevated); padding:0.625rem 0.75rem;
+  border-radius:0.625rem; margin-bottom:0.5rem; font-size:0.9375rem; font-weight:600;
+}
+.tabvis-row input{width:1.125rem;height:1.125rem;flex-shrink:0;}
+
+.todo-toolbar{display:flex; gap:0.375rem; margin-top:0.5rem;}
+.todo-toolbar button{
+  border:none; background:var(--chip-bg); color:var(--text-secondary); width:2.25rem; height:2.25rem; border-radius:0.5rem;
+  display:flex; align-items:center; justify-content:center; font-size:0.875rem; cursor:pointer;
+}
+.todo-toolbar button:active{transform:scale(0.92);}
+.color-swatch-row{display:flex; gap:0.5rem; flex-wrap:wrap; margin-top:0.5rem;}
+.color-swatch{
+  width:2rem; height:2rem; border-radius:50%; border:2px solid transparent; cursor:pointer; padding:0;
+  display:flex; align-items:center; justify-content:center;
+}
+.color-swatch.active{border-color:var(--text);}
+.color-swatch.none{background:var(--chip-bg); color:var(--text-tertiary); font-size:0.65625rem; font-weight:700;}
+.inline-color-picker{background:var(--bg-secondary); padding:0.5rem; border-radius:0.625rem;}
+
 .toast{
   position:fixed; bottom:calc(6.25rem + env(safe-area-inset-bottom)); left:50%; transform:translateX(-50%);
   background:rgba(30,30,32,0.92); color:#fff; padding:0.625rem 1.125rem; border-radius:1.25rem; font-size:0.84375rem;
@@ -337,6 +358,7 @@ main{
   <header class="topbar">
     <div class="topbar-left"><i class="fa-solid fa-list-check"></i><h1>ToDo</h1></div>
     <div class="topbar-right">
+      <button id="timetreeBtn" class="icon-btn" title="TimeTreeを開く"><i class="fa-solid fa-calendar-days"></i></button>
       <button id="syncBtn" class="icon-btn" title="同期設定"><i class="fa-solid fa-arrows-rotate"></i></button>
       <button id="settingsBtn" class="icon-btn" title="設定"><i class="fa-solid fa-gear"></i></button>
     </div>
@@ -402,6 +424,9 @@ main{
       </label>
       <label>ジャンル
         <select id="todoGenreInput"></select>
+      </label>
+      <label>カラー
+        <div class="color-swatch-row" id="todoColorInput"></div>
       </label>
       <label class="checkbox-row" style="margin-bottom:1rem;">
         <input type="checkbox" id="todoDoneInput"> 完了にする
@@ -496,6 +521,11 @@ main{
           <button type="button" class="option-btn" data-value="maru">丸ゴシック</button>
         </div>
       </div>
+      <div class="settings-section">
+        <div class="settings-label">タブの表示設定</div>
+        <p class="hint">このデバイスで表示するワークスペースタブを選択できます（設定はこの端末のみに保存されます）。</p>
+        <div id="tabVisibilityList"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -533,6 +563,18 @@ const LOCAL_KEY = 'todoapp_data_v1';
 const CONFIG_KEY = 'todoapp_firebase_config_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
 const GENRE_COLORS = ['#ff9500','#5856d6','#34c759','#ff2d55','#007aff','#af52de','#ff3b30','#00c7be','#a2845e','#ffcc00'];
+const TODO_COLORS = [
+  { id:'red', hex:'#ff3b30' },
+  { id:'orange', hex:'#ff9500' },
+  { id:'yellow', hex:'#ffcc00' },
+  { id:'green', hex:'#34c759' },
+  { id:'blue', hex:'#007aff' },
+  { id:'purple', hex:'#af52de' }
+];
+function todoColorHex(colorId){
+  const c = TODO_COLORS.find(x => x.id === colorId);
+  return c ? c.hex : null;
+}
 
 function defaultGenres(){
   return [
@@ -559,13 +601,30 @@ let ui = {
   refDate: startOfDay(new Date()),
   colorTheme: 'light',
   fontSize: 'standard',
-  fontFamily: 'gothic'
+  fontFamily: 'gothic',
+  hiddenWorkspaces: []
 };
 
 let editingTodoId = null;      // when set, todoModal is in edit mode
 let dayModalDate = null;       // iso date string currently shown in day modal
 let pendingReturnToDay = null; // day modal iso to reopen once todoModal closes
 let progressSaveTimers = {};
+let dragSourceId = null;
+
+/* ---------------------------------------------------------------- */
+/* TimeTree launch                                                     */
+/* ---------------------------------------------------------------- */
+function openTimeTree(){
+  const fallbackUrl = 'https://timetreeapp.com/';
+  let didHide = false;
+  const onVisibilityChange = () => { if (document.hidden) didHide = true; };
+  document.addEventListener('visibilitychange', onVisibilityChange);
+  window.location.href = 'timetree://';
+  setTimeout(() => {
+    document.removeEventListener('visibilitychange', onVisibilityChange);
+    if (!didHide) window.open(fallbackUrl, '_blank');
+  }, 1200);
+}
 
 /* ---------------------------------------------------------------- */
 /* Date helpers                                                       */
@@ -614,10 +673,28 @@ function loadLocalCache(){
 function migrateTodos(){
   const fallback = db.workspaces[0] ? db.workspaces[0].id : null;
   db.todos.forEach(t => { if (!t.workspaceId) t.workspaceId = fallback; });
+  const groups = {};
+  db.todos.forEach(t => {
+    const key = t.workspaceId + '|' + t.date;
+    (groups[key] = groups[key] || []).push(t);
+  });
+  Object.values(groups).forEach(arr => {
+    if (arr.some(t => t.order === undefined || t.order === null)) {
+      arr.sort((a,b) => (a.createdAt||0) - (b.createdAt||0));
+      arr.forEach((t,i) => { if (t.order === undefined || t.order === null) t.order = i; });
+    }
+  });
+}
+function nextOrderFor(workspaceId, date){
+  const siblings = db.todos.filter(t => t.workspaceId === workspaceId && t.date === date);
+  if (!siblings.length) return 0;
+  return Math.max(...siblings.map(t => (t.order||0))) + 1;
 }
 function ensureActiveWorkspaceValid(){
-  if (!ui.activeWorkspace || !db.workspaces.find(w => w.id === ui.activeWorkspace)) {
-    ui.activeWorkspace = db.workspaces[0] ? db.workspaces[0].id : null;
+  const visible = db.workspaces.filter(w => !ui.hiddenWorkspaces.includes(w.id));
+  const pool = visible.length ? visible : db.workspaces;
+  if (!ui.activeWorkspace || !pool.find(w => w.id === ui.activeWorkspace)) {
+    ui.activeWorkspace = pool[0] ? pool[0].id : null;
   }
 }
 function savePrefs(){
@@ -625,7 +702,8 @@ function savePrefs(){
     localStorage.setItem(PREF_KEY, JSON.stringify({
       colorTheme: ui.colorTheme, fontSize: ui.fontSize, fontFamily: ui.fontFamily,
       viewMode: ui.viewMode, listTab: ui.listTab, calendarPeriod: ui.calendarPeriod,
-      genreFilter: ui.genreFilter, activeWorkspace: ui.activeWorkspace
+      genreFilter: ui.genreFilter, activeWorkspace: ui.activeWorkspace,
+      hiddenWorkspaces: ui.hiddenWorkspaces
     }));
   } catch(e){}
 }
@@ -643,6 +721,7 @@ function loadPrefs(){
       ui.calendarPeriod = p.calendarPeriod || '1month';
       ui.genreFilter = p.genreFilter || 'all';
       ui.activeWorkspace = p.activeWorkspace || null;
+      ui.hiddenWorkspaces = Array.isArray(p.hiddenWorkspaces) ? p.hiddenWorkspaces : [];
     } catch(e){}
   }
   if (!ui.colorTheme) {
@@ -818,7 +897,9 @@ function escapeAttr(s){ return escapeHtml(s); }
 /* ---------------------------------------------------------------- */
 function renderWorkspaceBar(){
   const bar = document.getElementById('workspaceBar');
-  let html = db.workspaces.map(w =>
+  const visible = db.workspaces.filter(w => !ui.hiddenWorkspaces.includes(w.id));
+  const list = visible.length ? visible : db.workspaces;
+  let html = list.map(w =>
     `<button class="ws-tab ${ui.activeWorkspace===w.id?'active':''}" data-ws="${escapeAttr(w.id)}">${escapeHtml(w.name)}</button>`
   ).join('');
   html += `<button class="ws-tab ws-manage" id="manageWorkspacesBtn" title="ワークスペース管理"><i class="fa-solid fa-gear"></i></button>`;
@@ -902,8 +983,7 @@ function renderListView(){
 
   filtered = filtered.slice().sort((a,b) => {
     if (a.date !== b.date) return a.date < b.date ? -1 : 1;
-    if (a.done !== b.done) return a.done ? 1 : -1;
-    return a.title.localeCompare(b.title, 'ja');
+    return (a.order||0) - (b.order||0);
   });
 
   if (filtered.length === 0) {
@@ -928,8 +1008,12 @@ function renderListView(){
 
 function renderTodoItem(todo){
   const genre = getGenre(todo.genreId);
+  const colorHex = todoColorHex(todo.color);
+  const cardStyle = colorHex
+    ? `border-left:4px solid ${colorHex}; background:color-mix(in srgb, ${colorHex} 10%, var(--bg-elevated));`
+    : '';
   return `
-  <div class="todo-item ${todo.done?'done':''}" data-id="${todo.id}">
+  <div class="todo-item ${todo.done?'done':''}" data-id="${todo.id}" draggable="true" style="${cardStyle}">
     <div class="todo-main">
       <button class="check-btn" data-action="toggle" data-id="${todo.id}"><i class="fa-${todo.done?'solid fa-circle-check':'regular fa-circle'}"></i></button>
       <div class="todo-content">
@@ -939,6 +1023,15 @@ function renderTodoItem(todo){
         </div>
         <div class="todo-date">${formatDisplayDate(todo.date)}</div>
         <textarea class="progress-input" data-id="${todo.id}" placeholder="進捗メモを入力...">${escapeHtml(todo.progress||'')}</textarea>
+        <div class="todo-toolbar">
+          <button type="button" data-action="move-up" data-id="${todo.id}" title="上へ移動"><i class="fa-solid fa-chevron-up"></i></button>
+          <button type="button" data-action="move-down" data-id="${todo.id}" title="下へ移動"><i class="fa-solid fa-chevron-down"></i></button>
+          <button type="button" data-action="toggle-color-picker" data-id="${todo.id}" title="カラー"><i class="fa-solid fa-palette"></i></button>
+        </div>
+        <div class="color-swatch-row inline-color-picker" hidden data-id="${todo.id}">
+          <button type="button" class="color-swatch none" data-action="set-color" data-id="${todo.id}" data-color="">なし</button>
+          ${TODO_COLORS.map(c => `<button type="button" class="color-swatch ${todo.color===c.id?'active':''}" data-action="set-color" data-id="${todo.id}" data-color="${c.id}" style="background:${c.hex}"></button>`).join('')}
+        </div>
       </div>
       <button class="icon-btn danger" data-action="delete" data-id="${todo.id}" title="削除"><i class="fa-solid fa-trash"></i></button>
     </div>
@@ -993,7 +1086,7 @@ function weekdayRow(){
 
 function calCell(d, todosByDate, todayIso, isPad){
   const iso = toISO(d);
-  const dayTodos = (todosByDate[iso] || []).slice().sort((a,b)=> (a.done - b.done) || a.title.localeCompare(b.title,'ja'));
+  const dayTodos = (todosByDate[iso] || []).slice().sort((a,b)=> (a.order||0) - (b.order||0));
   const isToday = iso === todayIso;
   const maxShow = 3;
   const chips = dayTodos.slice(0, maxShow).map(t => {
@@ -1024,11 +1117,13 @@ function renderAll(){
 /* ---------------------------------------------------------------- */
 /* Todo CRUD                                                           */
 /* ---------------------------------------------------------------- */
-function addTodo({ title, date, workspaceId, genreId, progress, done }){
+function addTodo({ title, date, workspaceId, genreId, progress, done, color }){
+  const ws = workspaceId || ui.activeWorkspace;
   const todo = {
     id: uid(), title: title.trim(), date,
-    workspaceId: workspaceId || ui.activeWorkspace,
-    genreId: genreId || null, progress: progress || '', done: !!done, createdAt: Date.now()
+    workspaceId: ws,
+    genreId: genreId || null, progress: progress || '', done: !!done, color: color || null,
+    order: nextOrderFor(ws, date), createdAt: Date.now()
   };
   db.todos.push(todo);
   persist();
@@ -1037,6 +1132,11 @@ function addTodo({ title, date, workspaceId, genreId, progress, done }){
 function updateTodo(id, patch){
   const t = db.todos.find(x => x.id === id);
   if (!t) return;
+  const newDate = patch.date !== undefined ? patch.date : t.date;
+  const newWs = patch.workspaceId !== undefined ? patch.workspaceId : t.workspaceId;
+  if (newDate !== t.date || newWs !== t.workspaceId) {
+    patch = Object.assign({}, patch, { order: nextOrderFor(newWs, newDate) });
+  }
   Object.assign(t, patch);
   persist();
 }
@@ -1050,6 +1150,32 @@ function toggleTodo(id){
   t.done = !t.done;
   persist();
 }
+function moveTodo(id, dir){
+  const t = db.todos.find(x => x.id === id);
+  if (!t) return;
+  const siblings = db.todos.filter(x => x.date === t.date && x.workspaceId === t.workspaceId)
+    .sort((a,b) => (a.order||0) - (b.order||0));
+  const idx = siblings.indexOf(t);
+  const swapIdx = idx + dir;
+  if (swapIdx < 0 || swapIdx >= siblings.length) return;
+  const other = siblings[swapIdx];
+  const tmp = t.order; t.order = other.order; other.order = tmp;
+  persist();
+}
+function reorderByDrag(draggedId, targetId){
+  if (draggedId === targetId) return;
+  const dragged = db.todos.find(x => x.id === draggedId);
+  const target = db.todos.find(x => x.id === targetId);
+  if (!dragged || !target) return;
+  if (dragged.date !== target.date || dragged.workspaceId !== target.workspaceId) return;
+  const siblings = db.todos.filter(x => x.date === dragged.date && x.workspaceId === dragged.workspaceId)
+    .sort((a,b) => (a.order||0) - (b.order||0));
+  const withoutDragged = siblings.filter(x => x.id !== draggedId);
+  const targetIdx = withoutDragged.findIndex(x => x.id === targetId);
+  withoutDragged.splice(targetIdx, 0, dragged);
+  withoutDragged.forEach((x,i) => { x.order = i; });
+  persist();
+}
 
 /* ---------------------------------------------------------------- */
 /* Todo modal                                                          */
@@ -1061,6 +1187,11 @@ function populateGenreSelect(select, selectedId){
 function populateWorkspaceSelect(select, selectedId){
   select.innerHTML = db.workspaces.map(w => `<option value="${escapeAttr(w.id)}">${escapeHtml(w.name)}</option>`).join('');
   select.value = selectedId || ui.activeWorkspace || '';
+}
+function populateColorSwatches(container, selected){
+  container.dataset.value = selected || '';
+  container.innerHTML = `<button type="button" class="color-swatch none ${!selected?'active':''}" data-color="">なし</button>` +
+    TODO_COLORS.map(c => `<button type="button" class="color-swatch ${selected===c.id?'active':''}" data-color="${c.id}" style="background:${c.hex}"></button>`).join('');
 }
 function hideDayModalIfOpenFor(){
   const dm = document.getElementById('dayModal');
@@ -1078,6 +1209,7 @@ function openTodoModal(defaults){
   document.getElementById('todoDateInput').value = defaults && defaults.date ? defaults.date : toISO(ui.refDate);
   populateWorkspaceSelect(document.getElementById('todoWorkspaceInput'), defaults && defaults.workspaceId);
   populateGenreSelect(document.getElementById('todoGenreInput'), defaults && defaults.genreId);
+  populateColorSwatches(document.getElementById('todoColorInput'), defaults && defaults.color);
   document.getElementById('todoDoneInput').checked = false;
   document.getElementById('todoProgressInput').value = '';
   document.getElementById('todoModal').hidden = false;
@@ -1094,6 +1226,7 @@ function openTodoModalForEdit(id){
   document.getElementById('todoDateInput').value = t.date;
   populateWorkspaceSelect(document.getElementById('todoWorkspaceInput'), t.workspaceId);
   populateGenreSelect(document.getElementById('todoGenreInput'), t.genreId);
+  populateColorSwatches(document.getElementById('todoColorInput'), t.color);
   document.getElementById('todoDoneInput').checked = t.done;
   document.getElementById('todoProgressInput').value = t.progress || '';
   document.getElementById('todoModal').hidden = false;
@@ -1115,10 +1248,11 @@ function saveTodoModal(){
   const genreId = document.getElementById('todoGenreInput').value || null;
   const progress = document.getElementById('todoProgressInput').value;
   const done = document.getElementById('todoDoneInput').checked;
+  const color = document.getElementById('todoColorInput').dataset.value || null;
   if (editingTodoId) {
-    updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done });
+    updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done, color });
   } else {
-    addTodo({ title, date, workspaceId, genreId, progress, done });
+    addTodo({ title, date, workspaceId, genreId, progress, done, color });
   }
   closeTodoModal();
 }
@@ -1135,7 +1269,7 @@ function openDayModal(iso){
 function renderDayModalBody(){
   const body = document.getElementById('dayModalBody');
   const items = visibleTodos().filter(t => t.date === dayModalDate)
-    .sort((a,b)=> (a.done-b.done) || a.title.localeCompare(b.title,'ja'));
+    .sort((a,b)=> (a.order||0) - (b.order||0));
   if (items.length === 0) {
     body.innerHTML = `<div class="empty-state"><i class="fa-regular fa-circle-check"></i>この日のToDoはありません</div>`;
   } else {
@@ -1192,6 +1326,16 @@ function renderSettingsModal(){
   document.querySelectorAll('#fontSizeOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.fontSize));
   document.querySelectorAll('#colorThemeOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.colorTheme));
   document.querySelectorAll('#fontFamilyOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.fontFamily));
+  renderTabVisibilitySettings();
+}
+function renderTabVisibilitySettings(){
+  const list = document.getElementById('tabVisibilityList');
+  list.innerHTML = db.workspaces.map(w => `
+    <label class="tabvis-row">
+      <input type="checkbox" data-action="toggle-ws-visibility" data-id="${escapeAttr(w.id)}" ${ui.hiddenWorkspaces.includes(w.id) ? '' : 'checked'}>
+      ${escapeHtml(w.name)}
+    </label>
+  `).join('') || `<div class="empty-state" style="padding:1.5rem;">ワークスペースがありません</div>`;
 }
 function openSettingsModal(){ renderSettingsModal(); document.getElementById('settingsModal').hidden = false; }
 function closeSettingsModal(){ document.getElementById('settingsModal').hidden = true; }
@@ -1376,6 +1520,7 @@ function wireEvents(){
     if (!w) return;
     if (confirm(`「${w.name}」を削除しますか？このワークスペースのToDoは他のワークスペースに移動されます。`)) {
       db.workspaces = db.workspaces.filter(x => x.id !== id);
+      ui.hiddenWorkspaces = ui.hiddenWorkspaces.filter(x => x !== id);
       const fallback = db.workspaces[0].id;
       db.todos.forEach(t => { if (t.workspaceId === id) t.workspaceId = fallback; });
       ensureActiveWorkspaceValid();
@@ -1411,6 +1556,56 @@ function wireEvents(){
     const btn = e.target.closest('.option-btn'); if (!btn) return;
     ui.fontFamily = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
   });
+  document.getElementById('tabVisibilityList').addEventListener('change', (e) => {
+    const input = e.target.closest('input[data-action="toggle-ws-visibility"]');
+    if (!input) return;
+    const id = input.dataset.id;
+    const visibleCount = db.workspaces.filter(w => !ui.hiddenWorkspaces.includes(w.id)).length;
+    if (!input.checked && visibleCount <= 1) {
+      input.checked = true;
+      showToast('少なくとも1つのタブは表示しておく必要があります');
+      return;
+    }
+    if (input.checked) {
+      ui.hiddenWorkspaces = ui.hiddenWorkspaces.filter(x => x !== id);
+    } else if (!ui.hiddenWorkspaces.includes(id)) {
+      ui.hiddenWorkspaces.push(id);
+    }
+    ensureActiveWorkspaceValid();
+    savePrefs();
+    renderAll();
+  });
+
+  // Todo color picker (in modal)
+  document.getElementById('todoColorInput').addEventListener('click', (e) => {
+    const btn = e.target.closest('.color-swatch'); if (!btn) return;
+    const container = document.getElementById('todoColorInput');
+    container.dataset.value = btn.dataset.color || '';
+    container.querySelectorAll('.color-swatch').forEach(b => b.classList.toggle('active', b === btn));
+  });
+
+  // TimeTree launch button
+  document.getElementById('timetreeBtn').addEventListener('click', openTimeTree);
+
+  // Drag & drop reordering
+  document.addEventListener('dragstart', (e) => {
+    const item = e.target.closest('.todo-item');
+    if (!item) return;
+    dragSourceId = item.dataset.id;
+    try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragSourceId); } catch(err){}
+  });
+  document.addEventListener('dragover', (e) => {
+    if (!dragSourceId) return;
+    const item = e.target.closest('.todo-item');
+    if (!item) return;
+    e.preventDefault();
+  });
+  document.addEventListener('drop', (e) => {
+    if (!dragSourceId) return;
+    const item = e.target.closest('.todo-item');
+    if (item) { e.preventDefault(); reorderByDrag(dragSourceId, item.dataset.id); }
+    dragSourceId = null;
+  });
 
   // Sync modal
   document.getElementById('syncModalClose').addEventListener('click', closeSyncModal);
@@ -1440,6 +1635,18 @@ function wireEvents(){
       if (confirm('このToDoを削除しますか？')) deleteTodo(deleteBtn.dataset.id);
       return;
     }
+    const moveUpBtn = e.target.closest('[data-action="move-up"]');
+    if (moveUpBtn) { moveTodo(moveUpBtn.dataset.id, -1); return; }
+    const moveDownBtn = e.target.closest('[data-action="move-down"]');
+    if (moveDownBtn) { moveTodo(moveDownBtn.dataset.id, 1); return; }
+    const toggleColorBtn = e.target.closest('[data-action="toggle-color-picker"]');
+    if (toggleColorBtn) {
+      const row = document.querySelector(`.inline-color-picker[data-id="${CSS.escape(toggleColorBtn.dataset.id)}"]`);
+      if (row) row.hidden = !row.hidden;
+      return;
+    }
+    const setColorBtn = e.target.closest('[data-action="set-color"]');
+    if (setColorBtn) { updateTodo(setColorBtn.dataset.id, { color: setColorBtn.dataset.color || null }); return; }
     const editTarget = e.target.closest('[data-action="edit"]');
     if (editTarget) { openTodoModalForEdit(editTarget.dataset.id); return; }
     const cell = e.target.closest('.cal-cell');
