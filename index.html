@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, interactive-widget=resizes-content">
 <title>ToDo — 多機能タスク管理</title>
 <script>
 (function(){
@@ -303,15 +303,16 @@ main{
 .modal-overlay{
   position:fixed; inset:0; background:var(--overlay); z-index:100;
   display:flex; align-items:flex-end; justify-content:center;
+  overscroll-behavior:contain;
 }
 #todoModal.modal-overlay{ z-index:110; }
 @media (min-width:600px){ .modal-overlay{ align-items:center; } }
 .sheet{
   background:var(--bg-secondary); width:100%; max-width:32.5rem; border-radius:1rem 1rem 0 0;
-  max-height:88vh; display:flex; flex-direction:column; animation:slideup 0.22s ease-out;
+  max-height:88vh; max-height:88dvh; display:flex; flex-direction:column; animation:slideup 0.22s ease-out;
   padding-bottom:env(safe-area-inset-bottom);
 }
-@media (min-width:600px){ .sheet{ border-radius:1rem; max-height:80vh; margin-bottom:1.25rem;} }
+@media (min-width:600px){ .sheet{ border-radius:1rem; max-height:80vh; max-height:80dvh; margin-bottom:1.25rem;} }
 @keyframes slideup{from{transform:translateY(24px); opacity:0.6;} to{transform:translateY(0); opacity:1;}}
 .sheet-header{
   display:flex; align-items:center; justify-content:space-between;
@@ -321,7 +322,7 @@ main{
 .sheet-header h3{margin:0; font-size:1rem; font-weight:700;}
 .sheet-body{
   padding:1rem calc(1rem + env(safe-area-inset-right)) 1rem calc(1rem + env(safe-area-inset-left));
-  overflow-y:auto;
+  overflow-y:auto; -webkit-overflow-scrolling:touch; overscroll-behavior:contain;
 }
 .sheet-body label{display:block; font-size:0.8125rem; font-weight:700; color:var(--text-secondary); margin-bottom:0.875rem;}
 .sheet-body input[type=text], .sheet-body input[type=date], .sheet-body select, .sheet-body textarea{
@@ -666,6 +667,12 @@ let editingTodoId = null;      // when set, todoModal is in edit mode
 let dayModalDate = null;       // iso date string currently shown in day modal
 let pendingReturnToDay = null; // day modal iso to reopen once todoModal closes
 let progressSaveTimers = {};
+// While the user is focused on (or mid-IME-composition in) a progress-note textarea, a full
+// re-render would destroy and recreate that textarea's DOM node — killing focus, cursor position,
+// and any in-progress Japanese input conversion. So renders are deferred until focus/composition ends.
+let focusedProgressInputId = null;
+let isComposingProgress = false;
+let pendingRenderAll = false;
 let dragSourceId = null;
 let dragOverEl = null;
 let touchDrag = null; // { id, el, currentTarget } — active only during a touch-driven drag gesture
@@ -1174,6 +1181,12 @@ function calCell(d, todosByDate, todayIso, isPad){
 /* Render orchestration                                               */
 /* ---------------------------------------------------------------- */
 function renderAll(){
+  if (focusedProgressInputId || isComposingProgress) {
+    // defer: don't blow away the textarea the user is actively typing/converting in
+    pendingRenderAll = true;
+    return;
+  }
+  pendingRenderAll = false;
   renderWorkspaceBar();
   renderGenreBar();
   renderControls();
@@ -1182,6 +1195,9 @@ function renderAll(){
   document.getElementById('calendarView').hidden = ui.viewMode !== 'calendar';
   if (ui.viewMode === 'list') renderListView(); else renderCalendarView();
   if (!document.getElementById('dayModal').hidden && dayModalDate) renderDayModalBody();
+}
+function flushPendingRender(){
+  if (pendingRenderAll && !focusedProgressInputId && !isComposingProgress) renderAll();
 }
 
 /* ---------------------------------------------------------------- */
@@ -1808,14 +1824,33 @@ function wireEvents(){
       if (t && t.progress !== ta.value) { t.progress = ta.value; persist(); }
     }, 500);
   });
+  // Track focus so a remote/local re-render never destroys the textarea the user is typing in.
+  document.addEventListener('focusin', (e) => {
+    const ta = e.target.closest('.progress-input');
+    if (ta) focusedProgressInputId = ta.dataset.id;
+    // keep the focused field clear of the iOS software keyboard
+    const field = e.target.closest('input, textarea, select');
+    if (field) {
+      setTimeout(() => { try { field.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch(err){} }, 300);
+    }
+  });
+  // Guard against Firestore's onSnapshot (or any other persist()) re-rendering mid-IME-conversion.
+  document.addEventListener('compositionstart', (e) => {
+    if (e.target.closest('.progress-input')) isComposingProgress = true;
+  });
+  document.addEventListener('compositionend', (e) => {
+    if (e.target.closest('.progress-input')) { isComposingProgress = false; flushPendingRender(); }
+  });
   // avoid losing focus/caret on full re-render while typing progress notes
   document.addEventListener('focusout', (e) => {
     const ta = e.target.closest('.progress-input');
     if (!ta) return;
     const id = ta.dataset.id;
     clearTimeout(progressSaveTimers[id]);
+    if (focusedProgressInputId === id) focusedProgressInputId = null;
     const t = db.todos.find(x => x.id === id);
     if (t && t.progress !== ta.value) { t.progress = ta.value; persist(); }
+    flushPendingRender();
   });
 }
 
