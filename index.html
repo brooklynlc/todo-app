@@ -557,7 +557,7 @@ main{
     </div>
     <div class="sheet-body">
       <div id="syncStatus" class="sync-status"><span class="dot"></span><span id="syncStatusText">オフライン（このデバイスのみに保存）</span></div>
-      <p class="hint">Firebaseコンソール（無料）で作成したプロジェクトの「firebaseConfig」をそのまま貼り付けてください。Mac・iPhoneなど同じ設定を使うすべての端末でリアルタイムに同期されます。未設定でもオフラインで問題なく使えます。</p>
+      <p class="hint">このアプリには家族共有用のデータベースがあらかじめ設定されており、初回起動時に自動的に接続されます。双方のiPhoneで同じデータベースにつながっていれば、追加・編集・削除・並び替え・カラー変更などがリアルタイムに同期されます。別のFirebaseプロジェクトを使いたい場合は、下の内容を書き換えて保存してください。</p>
       <textarea id="firebaseConfigInput" rows="8" placeholder='{ "apiKey": "...", "authDomain": "...", "projectId": "...", "storageBucket": "...", "messagingSenderId": "...", "appId": "..." }'></textarea>
       <div class="sync-actions">
         <button id="saveSyncBtn" class="primary-btn">保存して接続</button>
@@ -578,7 +578,17 @@ main{
 /* ---------------------------------------------------------------- */
 const LOCAL_KEY = 'todoapp_data_v1';
 const CONFIG_KEY = 'todoapp_firebase_config_v1';
+const SYNC_DISABLED_KEY = 'todoapp_sync_disabled_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
+// Built-in family database — every device connects here automatically so both iPhones stay in sync out of the box.
+const DEFAULT_FIREBASE_CONFIG = {
+  apiKey: "AIzaSyA2Uaj4RfbAESV4WQE2qFmoRojnQYAzOHM",
+  authDomain: "our-family-todo.firebaseapp.com",
+  projectId: "our-family-todo",
+  storageBucket: "our-family-todo.firebasestorage.app",
+  messagingSenderId: "114118372482",
+  appId: "1:114118372482:web:8dc97c5f889579587cd89b"
+};
 const GENRE_COLORS = ['#ff9500','#5856d6','#34c759','#ff2d55','#007aff','#af52de','#ff3b30','#00c7be','#a2845e','#ffcc00'];
 const TODO_COLORS = [
   { id:'red', hex:'#ff3b30' },
@@ -890,7 +900,7 @@ function disconnectFirebase(){
   if (firestoreUnsub) { firestoreUnsub(); firestoreUnsub = null; }
   if (firebaseApp) { try { firebaseApp.delete(); } catch(e){} firebaseApp = null; }
   firestoreDb = null;
-  try { localStorage.removeItem(CONFIG_KEY); } catch(e){}
+  try { localStorage.removeItem(CONFIG_KEY); localStorage.setItem(SYNC_DISABLED_KEY, '1'); } catch(e){}
   setSyncStatus('off');
   document.getElementById('disconnectSyncBtn').hidden = true;
   showToast('オフラインに戻しました');
@@ -1379,6 +1389,14 @@ function closeSettingsModal(){ document.getElementById('settingsModal').hidden =
 /* ---------------------------------------------------------------- */
 function openSyncModal(){
   document.getElementById('disconnectSyncBtn').hidden = !hasStoredConfig();
+  const textarea = document.getElementById('firebaseConfigInput');
+  if (!textarea.value.trim()) {
+    try {
+      const raw = localStorage.getItem(CONFIG_KEY);
+      const cfg = raw ? JSON.parse(raw) : DEFAULT_FIREBASE_CONFIG;
+      textarea.value = JSON.stringify(cfg, null, 2);
+    } catch(e){}
+  }
   document.getElementById('syncModal').hidden = false;
 }
 function closeSyncModal(){ document.getElementById('syncModal').hidden = true; }
@@ -1709,6 +1727,7 @@ function wireEvents(){
     btn.textContent = '接続中...';
     try {
       localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+      try { localStorage.removeItem(SYNC_DISABLED_KEY); } catch(err){}
       await connectFirebase(config);
     } catch(e) { /* status already shown */ }
     finally {
@@ -1786,7 +1805,16 @@ function init(){
       const config = JSON.parse(raw);
       connectFirebase(config, { silent: true }).catch(() => {});
     } else {
-      setSyncStatus('off');
+      let syncDisabled = false;
+      try { syncDisabled = localStorage.getItem(SYNC_DISABLED_KEY) === '1'; } catch(e){}
+      if (syncDisabled) {
+        setSyncStatus('off');
+      } else {
+        // First launch on this device (or after a fresh install) — connect to the
+        // built-in family database automatically so both iPhones sync out of the box.
+        try { localStorage.setItem(CONFIG_KEY, JSON.stringify(DEFAULT_FIREBASE_CONFIG)); } catch(e){}
+        connectFirebase(DEFAULT_FIREBASE_CONFIG, { silent: true }).catch(() => {});
+      }
     }
   } catch(e) { setSyncStatus('off'); }
 }
