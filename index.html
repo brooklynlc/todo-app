@@ -1243,6 +1243,58 @@ function checkNotifications(){
 function registerServiceWorker(){
   if (!('serviceWorker' in navigator)) return;
   navigator.serviceWorker.register('sw.js').catch((e) => console.error(e));
+  // The worker reports back once it fires a background reminder on its own, so the foreground
+  // notifiedMap stays in sync and checkNotifications() doesn't re-notify for the same moment
+  // when the app is reopened.
+  navigator.serviceWorker.addEventListener('message', (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'sw-notified' && msg.id) {
+      const map = getNotifiedMap();
+      map[msg.id] = msg.momentMs;
+      setNotifiedMap(map);
+    }
+  });
+}
+// Don't bother scheduling further out than this — a service worker can be killed by the browser/OS
+// at any time while idle, so a very long-dated timer is unlikely to survive anyway. The foreground
+// 10-second loop (checkNotifications) remains the reliable path whenever the app is actually open;
+// this is strictly a best-effort extension for the "recently backgrounded" window.
+const SW_SCHEDULE_HORIZON_MS = 6 * 3600 * 1000;
+let lastScheduledSwIds = [];
+function scheduleServiceWorkerNotifications(){
+  if (!ui.notifyPopupEnabled || !('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.ready.then((reg) => {
+    if (!reg.active) return;
+    const now = Date.now();
+    const notifiedMap = getNotifiedMap();
+    const items = [];
+    db.todos.forEach((t) => {
+      if (t.done) return;
+      const moment = computeNotifyMoment(t);
+      if (!moment) return;
+      const momentMs = moment.getTime();
+      const delayMs = momentMs - now;
+      if (delayMs < 0 || delayMs > SW_SCHEDULE_HORIZON_MS) return;
+      if (notifiedMap[t.id] === momentMs) return;
+      const ws = getWorkspace(t.workspaceId);
+      items.push({
+        id: t.id, momentMs, delayMs,
+        title: `【${ws ? ws.name : 'ToDo'}】${t.title}の期限です`,
+        body: `${formatDisplayDate(t.date)} が期日です`,
+        tag: 'todo-' + t.id
+      });
+    });
+    reg.active.postMessage({ type: 'schedule-notifications', items });
+    lastScheduledSwIds = items.map(i => i.id);
+  }).catch(() => {});
+}
+function cancelServiceWorkerNotifications(){
+  if (!('serviceWorker' in navigator) || !lastScheduledSwIds.length) return;
+  const ids = lastScheduledSwIds;
+  lastScheduledSwIds = [];
+  navigator.serviceWorker.ready.then((reg) => {
+    if (reg.active) reg.active.postMessage({ type: 'cancel-notifications', ids });
+  }).catch(() => {});
 }
 
 /* ---------------------------------------------------------------- */
@@ -2432,11 +2484,21 @@ function init(){
   renderNotifyBanner();
   registerServiceWorker();
 
-  // Periodic background check for due reminders, plus an immediate check and a catch-up
-  // check whenever the tab regains focus (mobile browsers throttle timers while backgrounded).
+  // Periodic foreground check for due reminders, plus a catch-up check whenever the tab regains
+  // focus (mobile browsers throttle/suspend timers while backgrounded, so this loop alone can miss
+  // moments that pass while hidden). Going hidden instead hands the upcoming reminders off to the
+  // Service Worker (see scheduleServiceWorkerNotifications) so it can try to fire them on its own
+  // while this page's own JS may be suspended.
   checkNotifications();
   setInterval(checkNotifications, 10000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNotifications(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      scheduleServiceWorkerNotifications();
+    } else {
+      cancelServiceWorkerNotifications(); // avoid a duplicate pop right as the foreground loop resumes
+      checkNotifications();
+    }
+  });
 
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
