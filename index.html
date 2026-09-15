@@ -192,6 +192,9 @@ main{
 .todo-item.drag-over{
   box-shadow:0 0 0 2px var(--accent), var(--shadow-lg); transform:scale(1.015);
 }
+.todo-item.touch-dragging{
+  box-shadow:0 10px 26px rgba(0,0,0,0.3); position:relative; z-index:5; transition:none; opacity:0.98;
+}
 .todo-main{display:flex; align-items:flex-start; gap:0.25rem;}
 .drag-handle{
   flex-shrink:0; width:1.625rem; height:2.75rem; display:flex; align-items:center; justify-content:center;
@@ -242,21 +245,23 @@ main{
 .month-title{font-size:1rem; font-weight:700; margin:0 0 0.5rem 0.125rem;}
 .weekday-row{display:grid; grid-template-columns:repeat(7,1fr); gap:0.25rem; margin-bottom:0.25rem;}
 .weekday-row span{text-align:center; font-size:0.71875rem; font-weight:700; color:var(--text-tertiary);}
-.cal-grid{display:grid; grid-template-columns:repeat(7,1fr); gap:0.25rem;}
+.cal-grid{display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:0.25rem; width:100%;}
 .cal-cell{
-  background:var(--bg-elevated); border-radius:0.625rem; min-height:4.875rem; padding:0.3125rem; cursor:pointer;
+  background:var(--bg-elevated); border-radius:0.625rem; min-height:4.875rem; max-height:7rem; padding:0.3125rem; cursor:pointer;
   display:flex; flex-direction:column; gap:0.1875rem; box-shadow:var(--shadow); border:1px solid transparent;
+  overflow:hidden; min-width:0;
 }
 .cal-cell.pad{background:transparent; box-shadow:none;}
 .cal-cell.today{border-color:var(--accent);}
 .cal-daynum{font-size:0.75rem; font-weight:700; color:var(--text-secondary);}
 .cal-cell.pad .cal-daynum{color:var(--text-tertiary);}
 .cal-chip{
+  display:block; width:100%; min-width:0; max-width:100%; box-sizing:border-box;
   font-size:0.65625rem; font-weight:600; padding:2px 0.3125rem; border-radius:0.3125rem; background:var(--gc,#888); color:#fff;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 .cal-chip.done{opacity:0.5; text-decoration:line-through;}
-.cal-more{font-size:0.625rem; color:var(--text-tertiary); padding-left:2px;}
+.cal-more{font-size:0.625rem; color:var(--text-tertiary); padding-left:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 
 /* ---- large screen / desktop layout (PC・大画面モニター) ---- */
 @media screen and (min-width:768px){
@@ -282,7 +287,7 @@ main{
     display:grid; grid-template-columns:repeat(auto-fit, minmax(22rem,1fr)); gap:1.5rem; align-items:start;
   }
   .calendar-view.multi-month .month-block{ margin-bottom:0; }
-  .cal-cell{ min-height:7.5rem; padding:0.5rem; }
+  .cal-cell{ min-height:7.5rem; max-height:10rem; padding:0.5rem; }
   .cal-daynum{ font-size:0.875rem; }
   .cal-chip{ font-size:0.75rem; padding:3px 0.4375rem; }
   .month-title{ font-size:1.25rem; }
@@ -1168,7 +1173,8 @@ function calCell(d, todosByDate, todayIso, isPad){
   const maxShow = 3;
   const chips = dayTodos.slice(0, maxShow).map(t => {
     const c = todoColorHex(t.color) || genreColor(t.genreId);
-    return `<span class="cal-chip ${t.done?'done':''}" style="--gc:${c}">${escapeHtml(t.title)}</span>`;
+    // title attribute gives a hover/long-press hint of the full text before the day modal (full detail) opens
+    return `<span class="cal-chip ${t.done?'done':''}" style="--gc:${c}" title="${escapeAttr(t.title)}">${escapeHtml(t.title)}</span>`;
   }).join('');
   const more = dayTodos.length > maxShow ? `<span class="cal-more">+${dayTodos.length - maxShow}件</span>` : '';
   return `<div class="cal-cell ${isPad?'pad':''} ${isToday?'today':''}" data-date="${iso}">
@@ -1719,20 +1725,61 @@ function wireEvents(){
     dragSourceId = null;
   }
 
-  // Drag & drop reordering — touch (iOS/Android), since native HTML5 DnD doesn't fire via touch on iOS
+  // Drag & drop reordering — touch (iOS/Android), since native HTML5 DnD doesn't fire via touch on iOS.
+  // Two ways to start a drag:
+  //  1) grabbing the "≡" handle — starts instantly (handle has touch-action:none so iOS never steals the gesture for scrolling)
+  //  2) a short press-and-hold anywhere else on the card (except buttons/inputs/textarea) — starts after
+  //     DRAG_LONGPRESS_MS if the finger hasn't wandered, so a normal page scroll or a quick tap still works untouched.
+  const DRAG_LONGPRESS_MS = 260;
+  const DRAG_MOVE_CANCEL_PX = 10;
+  let pendingLongPress = null; // { timer, startX, startY }
+
+  function isDragExcludedTarget(target){
+    return !!target.closest('button, textarea, input, select, a');
+  }
+  function clearPendingLongPress(){
+    if (pendingLongPress) { clearTimeout(pendingLongPress.timer); pendingLongPress = null; }
+  }
+  function beginTouchDrag(card, touch){
+    touchDrag = { id: card.dataset.id, el: card, startY: touch.clientY, currentTarget: null };
+    card.classList.add('touch-dragging');
+    card.style.pointerEvents = 'none'; // so elementFromPoint below sees the card underneath, not the one following the finger
+    card.style.transform = 'translateY(0px) scale(1.02)';
+  }
+
   document.addEventListener('touchstart', (e) => {
+    if (touchDrag) return;
+    const touch = e.touches[0];
     const handle = e.target.closest('.drag-handle');
-    if (!handle) return;
-    const card = handle.closest('.todo-item');
-    if (!card) return;
-    touchDrag = { id: card.dataset.id, el: card, currentTarget: null };
-    card.classList.add('dragging');
+    if (handle) {
+      const card = handle.closest('.todo-item');
+      if (card) beginTouchDrag(card, touch);
+      return;
+    }
+    const card = e.target.closest('.todo-item');
+    if (!card || isDragExcludedTarget(e.target)) return;
+    clearPendingLongPress();
+    pendingLongPress = {
+      startX: touch.clientX, startY: touch.clientY,
+      timer: setTimeout(() => {
+        pendingLongPress = null;
+        beginTouchDrag(card, touch);
+      }, DRAG_LONGPRESS_MS)
+    };
   }, { passive: true });
 
   document.addEventListener('touchmove', (e) => {
+    const touch = e.touches[0];
+    if (pendingLongPress) {
+      if (Math.abs(touch.clientX - pendingLongPress.startX) > DRAG_MOVE_CANCEL_PX ||
+          Math.abs(touch.clientY - pendingLongPress.startY) > DRAG_MOVE_CANCEL_PX) {
+        clearPendingLongPress(); // finger is scrolling, not holding — let the page scroll normally
+      }
+    }
     if (!touchDrag) return;
     e.preventDefault(); // block page scroll while actively dragging a card
-    const touch = e.touches[0];
+    const dy = touch.clientY - touchDrag.startY;
+    touchDrag.el.style.transform = `translateY(${dy}px) scale(1.02)`; // card follows the finger 1:1
     const el = document.elementFromPoint(touch.clientX, touch.clientY);
     const targetCard = el && el.closest('.todo-item');
     if (touchDrag.currentTarget && touchDrag.currentTarget !== targetCard) {
@@ -1745,17 +1792,21 @@ function wireEvents(){
     }
   }, { passive: false });
 
-  function endTouchDrag(){
+  function endTouchDrag(e){
+    clearPendingLongPress();
     if (!touchDrag) return;
-    touchDrag.el.classList.remove('dragging');
+    if (e && e.cancelable) e.preventDefault(); // suppress the synthetic click iOS would otherwise fire after the drag
+    touchDrag.el.style.transform = '';
+    touchDrag.el.style.pointerEvents = '';
+    touchDrag.el.classList.remove('touch-dragging');
     if (touchDrag.currentTarget) {
       touchDrag.currentTarget.classList.remove('drag-over');
-      reorderByDrag(touchDrag.id, touchDrag.currentTarget.dataset.id);
+      reorderByDrag(touchDrag.id, touchDrag.currentTarget.dataset.id); // commits + persists (Firebase/LocalStorage) immediately
     }
     touchDrag = null;
   }
-  document.addEventListener('touchend', endTouchDrag);
-  document.addEventListener('touchcancel', endTouchDrag);
+  document.addEventListener('touchend', endTouchDrag, { passive: false });
+  document.addEventListener('touchcancel', endTouchDrag, { passive: false });
 
   // Sync modal
   document.getElementById('syncModalClose').addEventListener('click', closeSyncModal);
