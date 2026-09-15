@@ -258,14 +258,24 @@ main{
 }
 .cal-cell.pad{background:transparent; box-shadow:none;}
 .cal-cell.today{border-color:var(--accent);}
+.cal-cell.cal-drop-target{
+  border-color:var(--accent); box-shadow:0 0 0 2px var(--accent), var(--shadow-lg);
+  background:color-mix(in srgb, var(--accent) 14%, var(--bg-elevated));
+}
 .cal-daynum{font-size:0.75rem; font-weight:700; color:var(--text-secondary);}
 .cal-cell.pad .cal-daynum{color:var(--text-tertiary);}
 .cal-chip{
   display:block; width:100%; min-width:0; max-width:100%; box-sizing:border-box;
   font-size:0.65625rem; font-weight:600; padding:2px 0.3125rem; border-radius:0.3125rem; background:var(--gc,#888); color:#fff;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:grab;
 }
 .cal-chip.done{opacity:0.5; text-decoration:line-through;}
+.cal-chip.dragging, .cal-chip.drag-source-hidden{opacity:0.3;}
+.cal-chip-ghost{
+  position:fixed; z-index:300; pointer-events:none; transform:translate(-50%,-125%);
+  font-size:0.75rem; font-weight:700; padding:3px 0.5625rem; border-radius:0.375rem; background:var(--gc,#888); color:#fff;
+  box-shadow:0 8px 20px rgba(0,0,0,0.35); white-space:nowrap; max-width:70vw; overflow:hidden; text-overflow:ellipsis;
+}
 .cal-more{font-size:0.625rem; color:var(--text-tertiary); padding-left:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
 
 /* ---- large screen / desktop layout (PC・大画面モニター) ---- */
@@ -758,6 +768,9 @@ let pendingRenderAll = false;
 let dragSourceId = null;
 let dragOverEl = null;
 let touchDrag = null; // { id, el, currentTarget } — active only during a touch-driven drag gesture
+let calDragId = null;      // todo id being dragged between calendar day cells via mouse/HTML5 DnD
+let calDragOverCell = null;
+let calTouchDrag = null;   // { id, sourceChip, ghost, currentCell } — active during a touch-driven calendar drag
 
 /* ---------------------------------------------------------------- */
 /* TimeTree launch                                                     */
@@ -1366,7 +1379,7 @@ function calCell(d, todosByDate, todayIso, isPad){
   const chips = dayTodos.slice(0, maxShow).map(t => {
     const c = todoColorHex(t.color) || genreColor(t.genreId);
     // title attribute gives a hover/long-press hint of the full text before the day modal (full detail) opens
-    return `<span class="cal-chip ${t.done?'done':''}" style="--gc:${c}" title="${escapeAttr(t.title)}">${escapeHtml(t.title)}</span>`;
+    return `<span class="cal-chip ${t.done?'done':''}" data-id="${t.id}" draggable="true" style="--gc:${c}" title="${escapeAttr(t.title)}">${escapeHtml(t.title)}</span>`;
   }).join('');
   const more = dayTodos.length > maxShow ? `<span class="cal-more">+${dayTodos.length - maxShow}件</span>` : '';
   return `<div class="cal-cell ${isPad?'pad':''} ${isToday?'today':''}" data-date="${iso}">
@@ -1460,6 +1473,12 @@ function reorderByDrag(draggedId, targetId){
   withoutDragged.splice(targetIdx, 0, dragged);
   withoutDragged.forEach((x,i) => { x.order = i; });
   persist();
+}
+function moveTodoToDate(id, newDateIso){
+  const t = db.todos.find(x => x.id === id);
+  if (!t || !newDateIso || t.date === newDateIso) return;
+  updateTodo(id, { date: newDateIso }); // recomputes order for the target day and persists (LocalStorage + Firestore)
+  showToast(`${formatDisplayDate(newDateIso)} に移動しました`);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1982,7 +2001,14 @@ function wireEvents(){
 
   // Drag & drop reordering — mouse/desktop via HTML5 DnD, started only from the grip handle
   document.addEventListener('dragstart', (e) => {
-    if (touchDrag) { e.preventDefault(); return; } // a touch-driven drag is already in control (avoid double handling)
+    if (touchDrag || calTouchDrag) { e.preventDefault(); return; } // a touch-driven drag is already in control (avoid double handling)
+    const chip = e.target.closest('.cal-chip');
+    if (chip && chip.dataset.id) {
+      calDragId = chip.dataset.id;
+      chip.classList.add('dragging');
+      try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', calDragId); } catch(err){}
+      return;
+    }
     const item = e.target.closest('.todo-item');
     if (!item) return;
     if (!e.target.closest('.drag-handle')) { e.preventDefault(); return; }
@@ -1991,6 +2017,15 @@ function wireEvents(){
     try { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('text/plain', dragSourceId); } catch(err){}
   });
   document.addEventListener('dragover', (e) => {
+    if (calDragId) {
+      const cell = e.target.closest('.cal-cell');
+      if (!cell || !cell.dataset.date) return;
+      e.preventDefault();
+      if (calDragOverCell && calDragOverCell !== cell) calDragOverCell.classList.remove('cal-drop-target');
+      cell.classList.add('cal-drop-target');
+      calDragOverCell = cell;
+      return;
+    }
     if (!dragSourceId) return;
     const item = e.target.closest('.todo-item');
     if (!item || item.dataset.id === dragSourceId) return;
@@ -2000,17 +2035,32 @@ function wireEvents(){
     dragOverEl = item;
   });
   document.addEventListener('drop', (e) => {
+    if (calDragId) {
+      const cell = e.target.closest('.cal-cell');
+      if (cell && cell.dataset.date) { e.preventDefault(); moveTodoToDate(calDragId, cell.dataset.date); }
+      endCalDrag();
+      return;
+    }
     if (!dragSourceId) return;
     const item = e.target.closest('.todo-item');
     if (item) { e.preventDefault(); reorderByDrag(dragSourceId, item.dataset.id); }
     endDesktopDrag();
   });
-  document.addEventListener('dragend', endDesktopDrag);
+  document.addEventListener('dragend', (e) => {
+    if (calDragId) { endCalDrag(); return; }
+    endDesktopDrag();
+  });
   function endDesktopDrag(){
     const source = dragSourceId && document.querySelector(`.todo-item.dragging`);
     if (source) source.classList.remove('dragging');
     if (dragOverEl) { dragOverEl.classList.remove('drag-over'); dragOverEl = null; }
     dragSourceId = null;
+  }
+  function endCalDrag(){
+    const source = calDragId && document.querySelector('.cal-chip.dragging');
+    if (source) source.classList.remove('dragging');
+    if (calDragOverCell) { calDragOverCell.classList.remove('cal-drop-target'); calDragOverCell = null; }
+    calDragId = null;
   }
 
   // Drag & drop reordering — touch (iOS/Android), since native HTML5 DnD doesn't fire via touch on iOS.
@@ -2018,9 +2068,14 @@ function wireEvents(){
   //  1) grabbing the "≡" handle — starts instantly (handle has touch-action:none so iOS never steals the gesture for scrolling)
   //  2) a short press-and-hold anywhere else on the card (except buttons/inputs/textarea) — starts after
   //     DRAG_LONGPRESS_MS if the finger hasn't wandered, so a normal page scroll or a quick tap still works untouched.
+  // The calendar view reuses the same press-and-hold pattern (CAL_DRAG_LONGPRESS_MS) on each date chip,
+  // so a quick tap still opens the day modal while a hold-and-drag moves the ToDo to another date cell.
   const DRAG_LONGPRESS_MS = 260;
   const DRAG_MOVE_CANCEL_PX = 10;
+  const CAL_DRAG_LONGPRESS_MS = 260;
+  const CAL_DRAG_MOVE_CANCEL_PX = 10;
   let pendingLongPress = null; // { timer, startX, startY }
+  let pendingCalLongPress = null; // { timer, startX, startY }
 
   function isDragExcludedTarget(target){
     return !!target.closest('button, textarea, input, select, a');
@@ -2028,20 +2083,57 @@ function wireEvents(){
   function clearPendingLongPress(){
     if (pendingLongPress) { clearTimeout(pendingLongPress.timer); pendingLongPress = null; }
   }
+  function clearPendingCalLongPress(){
+    if (pendingCalLongPress) { clearTimeout(pendingCalLongPress.timer); pendingCalLongPress = null; }
+  }
   function beginTouchDrag(card, touch){
     touchDrag = { id: card.dataset.id, el: card, startY: touch.clientY, currentTarget: null };
     card.classList.add('touch-dragging');
     card.style.pointerEvents = 'none'; // so elementFromPoint below sees the card underneath, not the one following the finger
     card.style.transform = 'translateY(0px) scale(1.02)';
   }
+  function beginCalTouchDrag(chip, touch){
+    const ghost = document.createElement('div');
+    ghost.className = 'cal-chip-ghost';
+    ghost.textContent = chip.textContent;
+    ghost.style.setProperty('--gc', chip.style.getPropertyValue('--gc') || '#888');
+    ghost.style.left = touch.clientX + 'px';
+    ghost.style.top = touch.clientY + 'px';
+    document.body.appendChild(ghost);
+    chip.classList.add('drag-source-hidden'); // dim the original chip; the ghost follows the finger instead
+    // (cal-cell has overflow:hidden, so a translated-in-place chip would get clipped at the cell edge —
+    // a body-level fixed ghost is used instead so it can travel freely across the whole calendar grid)
+    calTouchDrag = { id: chip.dataset.id, sourceChip: chip, ghost, currentCell: null };
+  }
+  function finishCalTouchDrag(){
+    calTouchDrag.sourceChip.classList.remove('drag-source-hidden');
+    calTouchDrag.ghost.remove();
+    if (calTouchDrag.currentCell) {
+      calTouchDrag.currentCell.classList.remove('cal-drop-target');
+      moveTodoToDate(calTouchDrag.id, calTouchDrag.currentCell.dataset.date);
+    }
+    calTouchDrag = null;
+  }
 
   document.addEventListener('touchstart', (e) => {
-    if (touchDrag) return;
+    if (touchDrag || calTouchDrag) return;
     const touch = e.touches[0];
     const handle = e.target.closest('.drag-handle');
     if (handle) {
       const card = handle.closest('.todo-item');
       if (card) beginTouchDrag(card, touch);
+      return;
+    }
+    const chip = e.target.closest('.cal-chip');
+    if (chip && chip.dataset.id) {
+      clearPendingCalLongPress();
+      pendingCalLongPress = {
+        startX: touch.clientX, startY: touch.clientY,
+        timer: setTimeout(() => {
+          pendingCalLongPress = null;
+          beginCalTouchDrag(chip, touch);
+        }, CAL_DRAG_LONGPRESS_MS)
+      };
       return;
     }
     const card = e.target.closest('.todo-item');
@@ -2064,24 +2156,53 @@ function wireEvents(){
         clearPendingLongPress(); // finger is scrolling, not holding — let the page scroll normally
       }
     }
-    if (!touchDrag) return;
-    e.preventDefault(); // block page scroll while actively dragging a card
-    const dy = touch.clientY - touchDrag.startY;
-    touchDrag.el.style.transform = `translateY(${dy}px) scale(1.02)`; // card follows the finger 1:1
-    const el = document.elementFromPoint(touch.clientX, touch.clientY);
-    const targetCard = el && el.closest('.todo-item');
-    if (touchDrag.currentTarget && touchDrag.currentTarget !== targetCard) {
-      touchDrag.currentTarget.classList.remove('drag-over');
-      touchDrag.currentTarget = null;
+    if (pendingCalLongPress) {
+      if (Math.abs(touch.clientX - pendingCalLongPress.startX) > CAL_DRAG_MOVE_CANCEL_PX ||
+          Math.abs(touch.clientY - pendingCalLongPress.startY) > CAL_DRAG_MOVE_CANCEL_PX) {
+        clearPendingCalLongPress(); // finger is scrolling the calendar, not holding — let it scroll/swipe normally
+      }
     }
-    if (targetCard && targetCard !== touchDrag.el) {
-      targetCard.classList.add('drag-over');
-      touchDrag.currentTarget = targetCard;
+    if (touchDrag) {
+      e.preventDefault(); // block page scroll while actively dragging a card
+      const dy = touch.clientY - touchDrag.startY;
+      touchDrag.el.style.transform = `translateY(${dy}px) scale(1.02)`; // card follows the finger 1:1
+      const el = document.elementFromPoint(touch.clientX, touch.clientY);
+      const targetCard = el && el.closest('.todo-item');
+      if (touchDrag.currentTarget && touchDrag.currentTarget !== targetCard) {
+        touchDrag.currentTarget.classList.remove('drag-over');
+        touchDrag.currentTarget = null;
+      }
+      if (targetCard && targetCard !== touchDrag.el) {
+        targetCard.classList.add('drag-over');
+        touchDrag.currentTarget = targetCard;
+      }
+      return;
+    }
+    if (calTouchDrag) {
+      e.preventDefault(); // block page scroll while actively dragging a calendar chip
+      calTouchDrag.ghost.style.left = touch.clientX + 'px';
+      calTouchDrag.ghost.style.top = touch.clientY + 'px';
+      const el = document.elementFromPoint(touch.clientX, touch.clientY);
+      const targetCell = el && el.closest('.cal-cell');
+      if (calTouchDrag.currentCell && calTouchDrag.currentCell !== targetCell) {
+        calTouchDrag.currentCell.classList.remove('cal-drop-target');
+        calTouchDrag.currentCell = null;
+      }
+      if (targetCell && targetCell.dataset.date) {
+        targetCell.classList.add('cal-drop-target');
+        calTouchDrag.currentCell = targetCell;
+      }
     }
   }, { passive: false });
 
   function endTouchDrag(e){
     clearPendingLongPress();
+    clearPendingCalLongPress();
+    if (calTouchDrag) {
+      if (e && e.cancelable) e.preventDefault(); // suppress the synthetic click iOS would otherwise fire after the drag
+      finishCalTouchDrag();
+      return;
+    }
     if (!touchDrag) return;
     if (e && e.cancelable) e.preventDefault(); // suppress the synthetic click iOS would otherwise fire after the drag
     touchDrag.el.style.transform = '';
