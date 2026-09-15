@@ -738,7 +738,7 @@ function defaultWorkspaces(){
   ];
 }
 
-let db = { todos: [], genres: defaultGenres(), workspaces: defaultWorkspaces() };
+let db = { todos: [], genres: defaultGenres(), workspaces: defaultWorkspaces(), deletedTodos: [] };
 
 let ui = {
   viewMode: 'list',      // 'list' | 'calendar'
@@ -825,19 +825,29 @@ function loadLocalCache(){
       db = {
         todos: parsed.todos || [],
         genres: (parsed.genres && parsed.genres.length) ? parsed.genres : defaultGenres(),
-        workspaces: (parsed.workspaces && parsed.workspaces.length) ? parsed.workspaces : defaultWorkspaces()
+        workspaces: (parsed.workspaces && parsed.workspaces.length) ? parsed.workspaces : defaultWorkspaces(),
+        deletedTodos: Array.isArray(parsed.deletedTodos) ? parsed.deletedTodos : []
       };
     }
   } catch(e){ console.error(e); }
   migrateTodos();
 }
+// Keeps notification fields well-typed (string date "YYYY-MM-DD", string time "HH:MM", or null;
+// advance limited to the known enum) so a malformed/legacy value never breaks computeNotifyMoment
+// or gets written back to Firestore as something unexpected.
+const NOTIFY_ADVANCE_VALUES = new Set(['none', 'onTime', '1day', '2day', '1week']);
+function normalizeNotifyFields(t){
+  t.notifyDate = (typeof t.notifyDate === 'string' && t.notifyDate) ? t.notifyDate : null;
+  t.notifyTime = (typeof t.notifyTime === 'string' && t.notifyTime) ? t.notifyTime : null;
+  t.notifyAdvance = NOTIFY_ADVANCE_VALUES.has(t.notifyAdvance) ? t.notifyAdvance : 'none';
+}
 function migrateTodos(){
   const fallback = db.workspaces[0] ? db.workspaces[0].id : null;
+  if (!Array.isArray(db.deletedTodos)) db.deletedTodos = [];
   db.todos.forEach(t => {
     if (!t.workspaceId) t.workspaceId = fallback;
-    if (!t.notifyAdvance) t.notifyAdvance = 'none';
-    if (t.notifyDate === undefined) t.notifyDate = null;
-    if (t.notifyTime === undefined) t.notifyTime = null;
+    normalizeNotifyFields(t);
+    if (!t.updatedAt) t.updatedAt = t.createdAt || Date.now();
   });
   const groups = {};
   db.todos.forEach(t => {
@@ -998,8 +1008,16 @@ async function connectFirebase(config, {silent} = {}){
         if (snap.exists) {
           const data = snap.data();
           applyingRemote = true;
+          // Merge rather than overwrite: if this device has a newer local edit (by per-item
+          // updatedAt) that hasn't been pushed yet — e.g. this snapshot is an echo of a write
+          // that raced with one made moments ago on this same device, or an update from the
+          // other device that is itself running on a slightly stale local copy — a blind
+          // overwrite here would silently discard the newer edit (this was the root cause of
+          // notification settings "disappearing" after being saved).
+          const merged = mergeTodoState(data.todos, data.deletedTodos, db.todos, db.deletedTodos);
           db = {
-            todos: data.todos || [],
+            todos: merged.todos,
+            deletedTodos: merged.deletedTodos,
             genres: (data.genres && data.genres.length) ? data.genres : defaultGenres(),
             workspaces: (data.workspaces && data.workspaces.length) ? data.workspaces : defaultWorkspaces()
           };
@@ -1029,11 +1047,73 @@ async function connectFirebase(config, {silent} = {}){
   }
 }
 
+// Per-item last-write-wins merge (by updatedAt) keyed on todo id, with tombstones for deletions
+// so a device merging in a stale copy never resurrects something the other device deleted.
+// This replaces a plain "whichever device pushes last replaces the whole array" .set(), which is
+// what let one device's save of an unrelated field silently wipe another device's just-saved
+// notification settings when both wrote within the same sync window.
+function mergeTodoState(serverTodos, serverDeleted, localTodos, localDeleted){
+  const tombstones = {};
+  (serverDeleted || []).forEach(d => { if (d && d.id) tombstones[d.id] = Math.max(tombstones[d.id] || 0, d.deletedAt || 0); });
+  (localDeleted || []).forEach(d => { if (d && d.id) tombstones[d.id] = Math.max(tombstones[d.id] || 0, d.deletedAt || 0); });
+
+  const byId = {};
+  (serverTodos || []).forEach(t => { if (t && t.id) byId[t.id] = t; });
+  (localTodos || []).forEach(t => {
+    if (!t || !t.id) return;
+    const existing = byId[t.id];
+    if (!existing || (t.updatedAt || 0) >= (existing.updatedAt || 0)) byId[t.id] = t;
+  });
+
+  const mergedTodos = Object.values(byId).filter(t => {
+    const tomb = tombstones[t.id];
+    return !(tomb && tomb >= (t.updatedAt || 0));
+  });
+
+  const tombstoneCutoff = Date.now() - 60 * 24 * 3600 * 1000; // drop tombstones older than 60 days
+  const mergedDeleted = Object.keys(tombstones)
+    .filter(id => tombstones[id] >= tombstoneCutoff)
+    .map(id => ({ id, deletedAt: tombstones[id] }));
+
+  return { todos: mergedTodos, deletedTodos: mergedDeleted };
+}
+// Firestore rejects any document containing a literal `undefined` value outright — this is a
+// last-resort safety net so a future field that forgets a `|| null` fallback fails soft (silently
+// becomes null) instead of throwing and quietly aborting the entire sync write.
+function sanitizeForFirestore(todo){
+  const out = {};
+  Object.keys(todo).forEach(k => { out[k] = todo[k] === undefined ? null : todo[k]; });
+  return out;
+}
 function pushToFirestore(){
   if (!firestoreDb || applyingRemote) return;
-  firestoreDb.collection('todoAppData').doc('main')
-    .set({ todos: db.todos, genres: db.genres, workspaces: db.workspaces, updatedAt: Date.now() })
-    .catch((e) => { console.error(e); setSyncStatus('error', e.message); });
+  const ref = firestoreDb.collection('todoAppData').doc('main');
+  const localTodos = db.todos;
+  const localDeleted = db.deletedTodos;
+  const localGenres = db.genres;
+  const localWorkspaces = db.workspaces;
+  firestoreDb.runTransaction((tx) => tx.get(ref).then((snap) => {
+    const server = snap.exists ? snap.data() : {};
+    const merged = mergeTodoState(server.todos, server.deletedTodos, localTodos, localDeleted);
+    const payload = {
+      todos: merged.todos.map(sanitizeForFirestore),
+      deletedTodos: merged.deletedTodos,
+      genres: localGenres,
+      workspaces: localWorkspaces,
+      updatedAt: Date.now()
+    };
+    tx.set(ref, payload);
+    return merged;
+  })).then((merged) => {
+    // Reflect the fully-merged result locally too, in case the transaction pulled in an edit
+    // from the other device that this device's in-memory state didn't have yet.
+    applyingRemote = true;
+    db.todos = merged.todos;
+    db.deletedTodos = merged.deletedTodos;
+    saveLocalCache();
+    renderAll();
+    applyingRemote = false;
+  }).catch((e) => { console.error(e); setSyncStatus('error', e.message); });
 }
 
 function disconnectFirebase(){
@@ -1416,12 +1496,13 @@ function flushPendingRender(){
 /* ---------------------------------------------------------------- */
 function addTodo({ title, date, workspaceId, genreId, progress, done, color, notifyDate, notifyTime, notifyAdvance }){
   const ws = workspaceId || ui.activeWorkspace;
+  const now = Date.now();
   const todo = {
     id: uid(), title: title.trim(), date,
     workspaceId: ws,
     genreId: genreId || null, progress: progress || '', done: !!done, color: color || null,
     notifyDate: notifyDate || null, notifyTime: notifyTime || null, notifyAdvance: notifyAdvance || 'none',
-    order: nextOrderFor(ws, date), createdAt: Date.now()
+    order: nextOrderFor(ws, date), createdAt: now, updatedAt: now
   };
   db.todos.push(todo);
   persist();
@@ -1436,16 +1517,22 @@ function updateTodo(id, patch){
     patch = Object.assign({}, patch, { order: nextOrderFor(newWs, newDate) });
   }
   Object.assign(t, patch);
+  normalizeNotifyFields(t);
+  t.updatedAt = Date.now();
   persist();
 }
 function deleteTodo(id){
   db.todos = db.todos.filter(x => x.id !== id);
+  // Recorded as a tombstone (not just dropped) so a sync merge against a device that hasn't
+  // seen this deletion yet doesn't resurrect the item — see mergeTodoState().
+  db.deletedTodos.push({ id, deletedAt: Date.now() });
   persist();
 }
 function toggleTodo(id){
   const t = db.todos.find(x => x.id === id);
   if (!t) return;
   t.done = !t.done;
+  t.updatedAt = Date.now();
   persist();
 }
 function moveTodo(id, dir){
@@ -1458,6 +1545,8 @@ function moveTodo(id, dir){
   if (swapIdx < 0 || swapIdx >= siblings.length) return;
   const other = siblings[swapIdx];
   const tmp = t.order; t.order = other.order; other.order = tmp;
+  const now = Date.now();
+  t.updatedAt = now; other.updatedAt = now;
   persist();
 }
 function reorderByDrag(draggedId, targetId){
@@ -1471,7 +1560,8 @@ function reorderByDrag(draggedId, targetId){
   const withoutDragged = siblings.filter(x => x.id !== draggedId);
   const targetIdx = withoutDragged.findIndex(x => x.id === targetId);
   withoutDragged.splice(targetIdx, 0, dragged);
-  withoutDragged.forEach((x,i) => { x.order = i; });
+  const now = Date.now();
+  withoutDragged.forEach((x,i) => { if (x.order !== i) { x.order = i; x.updatedAt = now; } });
   persist();
 }
 function moveTodoToDate(id, newDateIso){
