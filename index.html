@@ -3,6 +3,11 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, interactive-widget=resizes-content">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#007aff">
+<link rel="manifest" href="manifest.json">
 <title>ToDo — 多機能タスク管理</title>
 <script>
 (function(){
@@ -382,6 +387,26 @@ main{
 }
 .tabvis-row input{width:1.125rem;height:1.125rem;flex-shrink:0;}
 
+.switch-row{
+  display:flex; align-items:center; justify-content:space-between; gap:0.625rem; background:var(--bg-elevated);
+  padding:0.75rem 0.875rem; border-radius:0.625rem; margin-bottom:0.5rem; font-size:0.9375rem; font-weight:600;
+}
+.switch{position:relative; display:inline-block; width:3rem; height:1.75rem; flex-shrink:0;}
+.switch input{opacity:0; width:0; height:0; position:absolute;}
+.switch .slider{
+  position:absolute; inset:0; background:var(--chip-bg); border-radius:1rem; cursor:pointer; transition:background 0.15s;
+}
+.switch .slider::before{
+  content:""; position:absolute; height:1.375rem; width:1.375rem; left:0.1875rem; top:0.1875rem;
+  background:#fff; border-radius:50%; transition:transform 0.15s; box-shadow:0 1px 3px rgba(0,0,0,0.3);
+}
+.switch input:checked + .slider{background:var(--accent-green);}
+.switch input:checked + .slider::before{transform:translateX(1.25rem);}
+.notify-permission{font-size:0.78125rem; color:var(--text-secondary); line-height:1.5; margin:0 0 0.625rem; display:flex; align-items:center; justify-content:space-between; gap:0.5rem; flex-wrap:wrap;}
+.notify-permission .text-btn{padding:0.25rem 0.5rem; min-height:auto;}
+.notify-datetime-row{display:flex; gap:0.5rem;}
+.notify-datetime-row input{flex:1; min-width:0;}
+
 .todo-toolbar{display:flex; gap:0.375rem; margin-top:0.5rem;}
 .todo-toolbar button{
   border:none; background:var(--chip-bg); color:var(--text-secondary); width:2.25rem; height:2.25rem; border-radius:0.5rem;
@@ -484,6 +509,21 @@ main{
       <label class="checkbox-row" style="margin-bottom:1rem;">
         <input type="checkbox" id="todoDoneInput"> 完了にする
       </label>
+      <label>通知設定
+        <div class="notify-datetime-row">
+          <input type="date" id="todoNotifyDateInput">
+          <input type="time" id="todoNotifyTimeInput" value="09:00">
+        </div>
+      </label>
+      <label>事前通知タイミング
+        <select id="todoNotifyAdvanceInput">
+          <option value="none">なし</option>
+          <option value="onTime">指定時間ちょうど</option>
+          <option value="1day">1日前</option>
+          <option value="2day">2日前</option>
+          <option value="1week">1週間前</option>
+        </select>
+      </label>
       <label>進捗状況メモ
         <textarea id="todoProgressInput" placeholder="どこまで進んでいるかを記録..."></textarea>
       </label>
@@ -575,6 +615,22 @@ main{
         </div>
       </div>
       <div class="settings-section">
+        <div class="settings-label">通知・アラーム</div>
+        <p class="notify-permission">
+          <span id="notifyPermissionText">通知許可: 未確認</span>
+          <button type="button" class="text-btn" id="requestNotifyPermissionBtn">許可をリクエスト</button>
+        </p>
+        <label class="switch-row">
+          ポップアップ通知
+          <span class="switch"><input type="checkbox" id="notifyPopupToggle"><span class="slider"></span></span>
+        </label>
+        <label class="switch-row">
+          アラーム音
+          <span class="switch"><input type="checkbox" id="notifyAlarmToggle"><span class="slider"></span></span>
+        </label>
+        <p class="hint">各ToDoの編集画面で通知日時と事前通知タイミングを設定すると、指定した時刻にポップアップ通知とアラーム音でお知らせします。</p>
+      </div>
+      <div class="settings-section">
         <div class="settings-label">タブの表示設定</div>
         <p class="hint">このデバイスで表示するワークスペースタブを選択できます（設定はこの端末のみに保存されます）。</p>
         <div id="tabVisibilityList"></div>
@@ -616,6 +672,8 @@ const LOCAL_KEY = 'todoapp_data_v1';
 const CONFIG_KEY = 'todoapp_firebase_config_v1';
 const SYNC_DISABLED_KEY = 'todoapp_sync_disabled_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
+const NOTIFIED_KEY = 'todoapp_notified_v1';
+const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1week': 604800000 };
 // Built-in family database — every device connects here automatically so both iPhones stay in sync out of the box.
 const DEFAULT_FIREBASE_CONFIG = {
   apiKey: "AIzaSyA2Uaj4RfbAESV4WQE2qFmoRojnQYAzOHM",
@@ -665,7 +723,9 @@ let ui = {
   colorTheme: 'light',
   fontSize: 'standard',
   fontFamily: 'gothic',
-  hiddenWorkspaces: []
+  hiddenWorkspaces: [],
+  notifyPopupEnabled: false,
+  notifyAlarmEnabled: false
 };
 
 let editingTodoId = null;      // when set, todoModal is in edit mode
@@ -743,7 +803,12 @@ function loadLocalCache(){
 }
 function migrateTodos(){
   const fallback = db.workspaces[0] ? db.workspaces[0].id : null;
-  db.todos.forEach(t => { if (!t.workspaceId) t.workspaceId = fallback; });
+  db.todos.forEach(t => {
+    if (!t.workspaceId) t.workspaceId = fallback;
+    if (!t.notifyAdvance) t.notifyAdvance = 'none';
+    if (t.notifyDate === undefined) t.notifyDate = null;
+    if (t.notifyTime === undefined) t.notifyTime = null;
+  });
   const groups = {};
   db.todos.forEach(t => {
     const key = t.workspaceId + '|' + t.date;
@@ -774,7 +839,8 @@ function savePrefs(){
       colorTheme: ui.colorTheme, fontSize: ui.fontSize, fontFamily: ui.fontFamily,
       viewMode: ui.viewMode, listTab: ui.listTab, calendarPeriod: ui.calendarPeriod,
       genreFilter: ui.genreFilter, activeWorkspace: ui.activeWorkspace,
-      hiddenWorkspaces: ui.hiddenWorkspaces
+      hiddenWorkspaces: ui.hiddenWorkspaces,
+      notifyPopupEnabled: ui.notifyPopupEnabled, notifyAlarmEnabled: ui.notifyAlarmEnabled
     }));
   } catch(e){}
 }
@@ -793,6 +859,8 @@ function loadPrefs(){
       ui.genreFilter = p.genreFilter || 'all';
       ui.activeWorkspace = p.activeWorkspace || null;
       ui.hiddenWorkspaces = Array.isArray(p.hiddenWorkspaces) ? p.hiddenWorkspaces : [];
+      ui.notifyPopupEnabled = !!p.notifyPopupEnabled;
+      ui.notifyAlarmEnabled = !!p.notifyAlarmEnabled;
     } catch(e){}
   }
   if (!ui.colorTheme) {
@@ -946,6 +1014,105 @@ function disconnectFirebase(){
   setSyncStatus('off');
   document.getElementById('disconnectSyncBtn').hidden = true;
   showToast('オフラインに戻しました');
+}
+
+/* ---------------------------------------------------------------- */
+/* Notifications & alarm sound                                        */
+/* ---------------------------------------------------------------- */
+let audioCtx = null;
+let audioUnlocked = false;
+function unlockAudio(){
+  if (audioUnlocked) return;
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    audioUnlocked = true;
+  } catch(e){}
+}
+function playAlarmSound(){
+  try {
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    [0, 0.32, 0.64].forEach((offset) => {
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0, now + offset);
+      gain.gain.linearRampToValueAtTime(0.35, now + offset + 0.02);
+      gain.gain.linearRampToValueAtTime(0, now + offset + 0.26);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(now + offset);
+      osc.stop(now + offset + 0.3);
+    });
+  } catch(e){ console.error(e); }
+}
+function notifyPermissionSupported(){ return 'Notification' in window; }
+function requestNotifyPermission(){
+  if (!notifyPermissionSupported()) return Promise.resolve('unsupported');
+  if (Notification.permission === 'granted') return Promise.resolve('granted');
+  return Notification.requestPermission();
+}
+function showBrowserNotification(title, body, tag){
+  if (!notifyPermissionSupported() || Notification.permission !== 'granted') return;
+  const opts = { body, tag, renotify: true };
+  const send = (reg) => {
+    if (reg && reg.showNotification) reg.showNotification(title, opts);
+    else new Notification(title, opts);
+  };
+  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
+    navigator.serviceWorker.ready.then(send).catch(() => send(null));
+  } else {
+    send(null);
+  }
+}
+function computeNotifyMoment(todo){
+  if (!todo.notifyAdvance || todo.notifyAdvance === 'none') return null;
+  const dateStr = todo.notifyDate || todo.date;
+  if (!dateStr) return null;
+  const timeStr = todo.notifyTime || '09:00';
+  const [h, m] = timeStr.split(':').map(Number);
+  const base = fromISO(dateStr);
+  base.setHours(h || 0, m || 0, 0, 0);
+  const offset = NOTIFY_ADVANCE_MS[todo.notifyAdvance] || 0;
+  return new Date(base.getTime() - offset);
+}
+function getNotifiedMap(){
+  try { return JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '{}'); } catch(e){ return {}; }
+}
+function setNotifiedMap(map){
+  try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(map)); } catch(e){}
+}
+function fireNotification(todo){
+  const ws = getWorkspace(todo.workspaceId);
+  const title = `【${ws ? ws.name : 'ToDo'}】${todo.title}の期限です`;
+  const body = `${formatDisplayDate(todo.date)} が期日です`;
+  if (ui.notifyPopupEnabled) showBrowserNotification(title, body, 'todo-' + todo.id);
+  if (ui.notifyAlarmEnabled) playAlarmSound();
+  showToast(title);
+}
+function checkNotifications(){
+  if (!ui.notifyPopupEnabled && !ui.notifyAlarmEnabled) return;
+  const now = Date.now();
+  const notifiedMap = getNotifiedMap();
+  let changed = false;
+  db.todos.forEach(t => {
+    if (t.done) return;
+    const moment = computeNotifyMoment(t);
+    if (!moment) return;
+    const momentMs = moment.getTime();
+    if (momentMs > now) return;
+    if (notifiedMap[t.id] === momentMs) return;
+    fireNotification(t);
+    notifiedMap[t.id] = momentMs;
+    changed = true;
+  });
+  if (changed) setNotifiedMap(notifiedMap);
+}
+function registerServiceWorker(){
+  if (!('serviceWorker' in navigator)) return;
+  navigator.serviceWorker.register('sw.js').catch((e) => console.error(e));
 }
 
 /* ---------------------------------------------------------------- */
@@ -1209,12 +1376,13 @@ function flushPendingRender(){
 /* ---------------------------------------------------------------- */
 /* Todo CRUD                                                           */
 /* ---------------------------------------------------------------- */
-function addTodo({ title, date, workspaceId, genreId, progress, done, color }){
+function addTodo({ title, date, workspaceId, genreId, progress, done, color, notifyDate, notifyTime, notifyAdvance }){
   const ws = workspaceId || ui.activeWorkspace;
   const todo = {
     id: uid(), title: title.trim(), date,
     workspaceId: ws,
     genreId: genreId || null, progress: progress || '', done: !!done, color: color || null,
+    notifyDate: notifyDate || null, notifyTime: notifyTime || null, notifyAdvance: notifyAdvance || 'none',
     order: nextOrderFor(ws, date), createdAt: Date.now()
   };
   db.todos.push(todo);
@@ -1304,6 +1472,9 @@ function openTodoModal(defaults){
   populateGenreSelect(document.getElementById('todoGenreInput'), defaults && defaults.genreId);
   populateColorSwatches(document.getElementById('todoColorInput'), defaults && defaults.color);
   document.getElementById('todoDoneInput').checked = false;
+  document.getElementById('todoNotifyDateInput').value = '';
+  document.getElementById('todoNotifyTimeInput').value = '09:00';
+  document.getElementById('todoNotifyAdvanceInput').value = 'none';
   document.getElementById('todoProgressInput').value = '';
   document.getElementById('todoModal').hidden = false;
   setTimeout(() => document.getElementById('todoTitleInput').focus(), 50);
@@ -1322,6 +1493,9 @@ function openTodoModalForEdit(id){
   populateGenreSelect(document.getElementById('todoGenreInput'), t.genreId);
   populateColorSwatches(document.getElementById('todoColorInput'), t.color);
   document.getElementById('todoDoneInput').checked = t.done;
+  document.getElementById('todoNotifyDateInput').value = t.notifyDate || '';
+  document.getElementById('todoNotifyTimeInput').value = t.notifyTime || '09:00';
+  document.getElementById('todoNotifyAdvanceInput').value = t.notifyAdvance || 'none';
   document.getElementById('todoProgressInput').value = t.progress || '';
   document.getElementById('todoModal').hidden = false;
 }
@@ -1346,10 +1520,13 @@ function saveTodoModal(){
   const progress = document.getElementById('todoProgressInput').value;
   const done = document.getElementById('todoDoneInput').checked;
   const color = document.getElementById('todoColorInput').dataset.value || null;
+  const notifyAdvance = document.getElementById('todoNotifyAdvanceInput').value || 'none';
+  const notifyDate = notifyAdvance !== 'none' ? (document.getElementById('todoNotifyDateInput').value || date) : null;
+  const notifyTime = notifyAdvance !== 'none' ? (document.getElementById('todoNotifyTimeInput').value || '09:00') : null;
   if (editingTodoId) {
-    updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done, color });
+    updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done, color, notifyDate, notifyTime, notifyAdvance });
   } else {
-    addTodo({ title, date, workspaceId, genreId, progress, done, color });
+    addTodo({ title, date, workspaceId, genreId, progress, done, color, notifyDate, notifyTime, notifyAdvance });
   }
   closeTodoModal();
 }
@@ -1424,6 +1601,26 @@ function renderSettingsModal(){
   document.querySelectorAll('#colorThemeOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.colorTheme));
   document.querySelectorAll('#fontFamilyOptions .option-btn').forEach(b => b.classList.toggle('active', b.dataset.value === ui.fontFamily));
   renderTabVisibilitySettings();
+  renderNotifySettings();
+}
+function renderNotifySettings(){
+  document.getElementById('notifyPopupToggle').checked = ui.notifyPopupEnabled;
+  document.getElementById('notifyAlarmToggle').checked = ui.notifyAlarmEnabled;
+  const textEl = document.getElementById('notifyPermissionText');
+  const btn = document.getElementById('requestNotifyPermissionBtn');
+  if (!notifyPermissionSupported()) {
+    textEl.textContent = '通知許可: このブラウザは非対応';
+    btn.hidden = true;
+  } else if (Notification.permission === 'granted') {
+    textEl.textContent = '通知許可: 許可済み';
+    btn.hidden = true;
+  } else if (Notification.permission === 'denied') {
+    textEl.textContent = '通知許可: 拒否されています（ブラウザ設定から変更してください）';
+    btn.hidden = true;
+  } else {
+    textEl.textContent = '通知許可: 未確認';
+    btn.hidden = false;
+  }
 }
 function renderTabVisibilitySettings(){
   const list = document.getElementById('tabVisibilityList');
@@ -1661,6 +1858,33 @@ function wireEvents(){
     const btn = e.target.closest('.option-btn'); if (!btn) return;
     ui.fontFamily = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
   });
+  document.getElementById('requestNotifyPermissionBtn').addEventListener('click', async () => {
+    const perm = await requestNotifyPermission();
+    if (perm === 'unsupported') showToast('このブラウザは通知に対応していません');
+    else if (perm === 'denied') showToast('通知が拒否されました。ブラウザの設定から許可してください');
+    else if (perm === 'granted') showToast('通知を許可しました');
+    renderNotifySettings();
+  });
+  document.getElementById('notifyPopupToggle').addEventListener('change', async (e) => {
+    if (e.target.checked) {
+      showToast('通知の許可をリクエストします');
+      const perm = await requestNotifyPermission();
+      if (perm !== 'granted') {
+        e.target.checked = false;
+        showToast('ポップアップ通知を使うにはブラウザの通知許可が必要です');
+        renderNotifySettings();
+        return;
+      }
+    }
+    ui.notifyPopupEnabled = e.target.checked;
+    savePrefs();
+    renderNotifySettings();
+  });
+  document.getElementById('notifyAlarmToggle').addEventListener('change', (e) => {
+    ui.notifyAlarmEnabled = e.target.checked;
+    if (ui.notifyAlarmEnabled) unlockAudio();
+    savePrefs();
+  });
   document.getElementById('tabVisibilityList').addEventListener('change', (e) => {
     const input = e.target.closest('input[data-action="toggle-ws-visibility"]');
     if (!input) return;
@@ -1688,6 +1912,18 @@ function wireEvents(){
     container.dataset.value = btn.dataset.color || '';
     container.querySelectorAll('.color-swatch').forEach(b => b.classList.toggle('active', b === btn));
   });
+
+  // Prefill notification date/time from the due date once the user picks an advance timing
+  document.getElementById('todoNotifyAdvanceInput').addEventListener('change', (e) => {
+    if (e.target.value === 'none') return;
+    const dateInput = document.getElementById('todoNotifyDateInput');
+    const timeInput = document.getElementById('todoNotifyTimeInput');
+    if (!dateInput.value) dateInput.value = document.getElementById('todoDateInput').value;
+    if (!timeInput.value) timeInput.value = '09:00';
+  });
+
+  // Unlock the Web Audio context on the first user gesture so background alarm playback isn't blocked later
+  document.addEventListener('pointerdown', unlockAudio, { once: true });
 
   // TimeTree launch button
   document.getElementById('timetreeBtn').addEventListener('click', openTimeTree);
@@ -1915,6 +2151,13 @@ function init(){
   applySettings();
   wireEvents();
   renderAll();
+  registerServiceWorker();
+
+  // Periodic background check for due reminders, plus an immediate check and a catch-up
+  // check whenever the tab regains focus (mobile browsers throttle timers while backgrounded).
+  checkNotifications();
+  setInterval(checkNotifications, 20000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNotifications(); });
 
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
