@@ -406,6 +406,14 @@ main{
 .notify-permission .text-btn{padding:0.25rem 0.5rem; min-height:auto;}
 .notify-datetime-row{display:flex; gap:0.5rem;}
 .notify-datetime-row input{flex:1; min-width:0;}
+.notify-banner{
+  display:flex; align-items:center; justify-content:space-between; gap:0.75rem; flex-wrap:wrap;
+  margin:0.625rem calc(1rem + env(safe-area-inset-right)) 0 calc(1rem + env(safe-area-inset-left));
+  padding:0.75rem 0.875rem; border-radius:0.75rem; background:var(--bg-elevated); box-shadow:var(--shadow);
+  font-size:0.875rem; font-weight:600;
+}
+.notify-banner i{color:var(--accent); margin-right:0.25rem;}
+.notify-banner-actions{display:flex; gap:0.25rem; flex-shrink:0;}
 
 .todo-toolbar{display:flex; gap:0.375rem; margin-top:0.5rem;}
 .todo-toolbar button{
@@ -441,6 +449,14 @@ main{
       <button id="settingsBtn" class="icon-btn" title="設定"><i class="fa-solid fa-gear"></i></button>
     </div>
   </header>
+
+  <div id="notifyBanner" class="notify-banner" hidden>
+    <span><i class="fa-solid fa-bell"></i> 通知を有効にすると、ToDoの期限をお知らせできます</span>
+    <div class="notify-banner-actions">
+      <button type="button" id="notifyBannerEnableBtn" class="text-btn primary">有効にする</button>
+      <button type="button" id="notifyBannerDismissBtn" class="text-btn">閉じる</button>
+    </div>
+  </div>
 
   <div class="workspace-bar" id="workspaceBar"></div>
 
@@ -518,7 +534,7 @@ main{
       <label>事前通知タイミング
         <select id="todoNotifyAdvanceInput">
           <option value="none">なし</option>
-          <option value="onTime">指定時間ちょうど</option>
+          <option value="onTime">指定時刻</option>
           <option value="1day">1日前</option>
           <option value="2day">2日前</option>
           <option value="1week">1週間前</option>
@@ -673,6 +689,7 @@ const CONFIG_KEY = 'todoapp_firebase_config_v1';
 const SYNC_DISABLED_KEY = 'todoapp_sync_disabled_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
 const NOTIFIED_KEY = 'todoapp_notified_v1';
+const NOTIFY_BANNER_DISMISSED_KEY = 'todoapp_notify_banner_dismissed_v1';
 const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1week': 604800000 };
 // Built-in family database — every device connects here automatically so both iPhones stay in sync out of the box.
 const DEFAULT_FIREBASE_CONFIG = {
@@ -1057,15 +1074,19 @@ function requestNotifyPermission(){
 function showBrowserNotification(title, body, tag){
   if (!notifyPermissionSupported() || Notification.permission !== 'granted') return;
   const opts = { body, tag, renotify: true };
-  const send = (reg) => {
-    if (reg && reg.showNotification) reg.showNotification(title, opts);
-    else new Notification(title, opts);
-  };
-  if (navigator.serviceWorker && navigator.serviceWorker.ready) {
-    navigator.serviceWorker.ready.then(send).catch(() => send(null));
-  } else {
-    send(null);
-  }
+  const showViaConstructor = () => { try { new Notification(title, opts); } catch(e){ console.error('Notification() failed', e); } };
+  if (!navigator.serviceWorker) { showViaConstructor(); return; }
+  // navigator.serviceWorker.ready never rejects — if the worker never activates (e.g. registration
+  // failed, or this is the very first page load before install completes) it would hang forever and
+  // silently swallow the notification. Race it against a short timeout and fall back to the plain
+  // Notification constructor so a reminder always fires somehow.
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+  Promise.race([navigator.serviceWorker.ready, timeout])
+    .then((reg) => {
+      if (reg && reg.showNotification) reg.showNotification(title, opts);
+      else showViaConstructor();
+    })
+    .catch(showViaConstructor);
 }
 function computeNotifyMoment(todo){
   if (!todo.notifyAdvance || todo.notifyAdvance === 'none') return null;
@@ -1096,7 +1117,11 @@ function checkNotifications(){
   if (!ui.notifyPopupEnabled && !ui.notifyAlarmEnabled) return;
   const now = Date.now();
   const notifiedMap = getNotifiedMap();
+  const liveIds = new Set(db.todos.map(t => t.id));
   let changed = false;
+  Object.keys(notifiedMap).forEach(id => {
+    if (!liveIds.has(id)) { delete notifiedMap[id]; changed = true; }
+  });
   db.todos.forEach(t => {
     if (t.done) return;
     const moment = computeNotifyMoment(t);
@@ -1603,6 +1628,15 @@ function renderSettingsModal(){
   renderTabVisibilitySettings();
   renderNotifySettings();
 }
+function shouldShowNotifyBanner(){
+  if (!notifyPermissionSupported()) return false;
+  if (Notification.permission !== 'default') return false;
+  try { if (localStorage.getItem(NOTIFY_BANNER_DISMISSED_KEY) === '1') return false; } catch(e){}
+  return true;
+}
+function renderNotifyBanner(){
+  document.getElementById('notifyBanner').hidden = !shouldShowNotifyBanner();
+}
 function renderNotifySettings(){
   document.getElementById('notifyPopupToggle').checked = ui.notifyPopupEnabled;
   document.getElementById('notifyAlarmToggle').checked = ui.notifyAlarmEnabled;
@@ -1858,12 +1892,29 @@ function wireEvents(){
     const btn = e.target.closest('.option-btn'); if (!btn) return;
     ui.fontFamily = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
   });
+  document.getElementById('notifyBannerEnableBtn').addEventListener('click', async () => {
+    const perm = await requestNotifyPermission();
+    if (perm === 'granted') {
+      ui.notifyPopupEnabled = true;
+      savePrefs();
+      showToast('通知を有効にしました');
+    } else if (perm === 'denied') {
+      showToast('通知が拒否されました。ブラウザの設定から変更できます');
+    }
+    renderNotifyBanner();
+    renderNotifySettings();
+  });
+  document.getElementById('notifyBannerDismissBtn').addEventListener('click', () => {
+    try { localStorage.setItem(NOTIFY_BANNER_DISMISSED_KEY, '1'); } catch(e){}
+    renderNotifyBanner();
+  });
   document.getElementById('requestNotifyPermissionBtn').addEventListener('click', async () => {
     const perm = await requestNotifyPermission();
     if (perm === 'unsupported') showToast('このブラウザは通知に対応していません');
     else if (perm === 'denied') showToast('通知が拒否されました。ブラウザの設定から許可してください');
     else if (perm === 'granted') showToast('通知を許可しました');
     renderNotifySettings();
+    renderNotifyBanner();
   });
   document.getElementById('notifyPopupToggle').addEventListener('change', async (e) => {
     if (e.target.checked) {
@@ -1879,6 +1930,7 @@ function wireEvents(){
     ui.notifyPopupEnabled = e.target.checked;
     savePrefs();
     renderNotifySettings();
+    renderNotifyBanner();
   });
   document.getElementById('notifyAlarmToggle').addEventListener('change', (e) => {
     ui.notifyAlarmEnabled = e.target.checked;
@@ -2151,12 +2203,13 @@ function init(){
   applySettings();
   wireEvents();
   renderAll();
+  renderNotifyBanner();
   registerServiceWorker();
 
   // Periodic background check for due reminders, plus an immediate check and a catch-up
   // check whenever the tab regains focus (mobile browsers throttle timers while backgrounded).
   checkNotifications();
-  setInterval(checkNotifications, 20000);
+  setInterval(checkNotifications, 30000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNotifications(); });
 
   try {
