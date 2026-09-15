@@ -644,9 +644,9 @@ main{
         <div class="settings-label">通知・アラーム</div>
         <p class="notify-permission">
           <span id="notifyPermissionText">通知許可: 未確認</span>
-          <button type="button" class="text-btn primary" id="requestNotifyPermissionBtn">通知を許可する（テスト）</button>
+          <button type="button" class="text-btn primary" id="requestNotifyPermissionBtn">通知を許可してFCM登録</button>
         </p>
-        <p class="hint">タップすると許可をリクエストし、許可されていればテスト通知とアラーム音をその場で鳴らします。鳴らない場合はブラウザ／端末側の通知設定をご確認ください。</p>
+        <p class="hint">タップすると通知の許可をリクエストし、この端末をプッシュ通知（FCM）に登録します。登録後はその場でテスト通知とアラーム音が鳴り、以後はアプリを閉じていても各ToDoの通知予定時刻にプッシュ通知が届きます（バックグラウンド時のアラーム音は端末標準の通知音になります）。</p>
         <label class="switch-row">
           ポップアップ通知
           <span class="switch"><input type="checkbox" id="notifyPopupToggle"><span class="slider"></span></span>
@@ -699,9 +699,12 @@ const LOCAL_KEY = 'todoapp_data_v1';
 const CONFIG_KEY = 'todoapp_firebase_config_v1';
 const SYNC_DISABLED_KEY = 'todoapp_sync_disabled_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
-const NOTIFIED_KEY = 'todoapp_notified_v1';
 const NOTIFY_BANNER_DISMISSED_KEY = 'todoapp_notify_banner_dismissed_v1';
-const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1week': 604800000 };
+// Web Push certificate key pair (public key) for this Firebase project's Cloud Messaging — required
+// by messaging.getToken() to register this browser for push. Sending the actual scheduled reminder
+// at the right time is done server-side by a Cloud Function (see functions/index.js); this key only
+// lets the browser obtain a device token so that function knows where to deliver it.
+const FCM_VAPID_KEY = 'BHYUe6zVDfRMOZtlzT7ssS36NEJBn_rhaVBn9pZN4jUzJEZvV4HsO2fR8ucjlHlyCXJil__LAWJc2L4vwq_E_-8';
 // Built-in family database — every device connects here automatically so both iPhones stay in sync out of the box.
 const DEFAULT_FIREBASE_CONFIG = {
   apiKey: "AIzaSyA2Uaj4RfbAESV4WQE2qFmoRojnQYAzOHM",
@@ -834,8 +837,8 @@ function loadLocalCache(){
   migrateTodos();
 }
 // Keeps notification fields well-typed (string date "YYYY-MM-DD", string time "HH:MM", or null;
-// advance limited to the known enum) so a malformed/legacy value never breaks computeNotifyMoment
-// or gets written back to Firestore as something unexpected.
+// advance limited to the known enum) so a malformed/legacy value never breaks the Cloud Function's
+// due-reminder check (functions/index.js) or gets written back to Firestore as something unexpected.
 const NOTIFY_ADVANCE_VALUES = new Set(['none', 'onTime', '1day', '2day', '1week']);
 function normalizeNotifyFields(t){
   t.notifyDate = (typeof t.notifyDate === 'string' && t.notifyDate) ? t.notifyDate : null;
@@ -925,6 +928,10 @@ function persist(){
 let firebaseApp = null;
 let firestoreDb = null;
 let firestoreUnsub = null;
+let messaging = null;
+let messagingUnsub = null;
+let swRegistration = null;
+let fcmToken = null;
 let scriptsLoaded = false;
 let scriptsLoadPromise = null;
 let applyingRemote = false;
@@ -945,6 +952,7 @@ function ensureFirebaseScripts(){
     scriptsLoadPromise = (async () => {
       await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js');
       await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/10.12.2/firebase-messaging-compat.js');
       scriptsLoaded = true;
     })().catch((e) => { scriptsLoadPromise = null; throw e; });
   }
@@ -1002,6 +1010,7 @@ async function connectFirebase(config, {silent} = {}){
     firebaseApp = firebase.initializeApp(config, 'todoapp-' + Date.now());
     firestoreDb = firebase.firestore(firebaseApp);
     try { firestoreDb.enablePersistence({ synchronizeTabs: true }).catch(()=>{}); } catch(e){}
+    initMessaging(firebaseApp);
 
     firestoreUnsub = firestoreDb.collection('todoAppData').doc('main').onSnapshot(
       (snap) => {
@@ -1165,136 +1174,82 @@ function requestNotifyPermission(){
   if (Notification.permission === 'granted') return Promise.resolve('granted');
   return Notification.requestPermission();
 }
-function showBrowserNotification(title, body, tag){
-  if (!notifyPermissionSupported() || Notification.permission !== 'granted') return;
-  const opts = { body, tag, renotify: true };
-  const showViaConstructor = () => { try { new Notification(title, opts); } catch(e){ console.error('Notification() failed', e); } };
-  if (!navigator.serviceWorker) { showViaConstructor(); return; }
-  // navigator.serviceWorker.ready never rejects — if the worker never activates (e.g. registration
-  // failed, or this is the very first page load before install completes) it would hang forever and
-  // silently swallow the notification. Race it against a short timeout and fall back to the plain
-  // Notification constructor so a reminder always fires somehow.
-  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
-  Promise.race([navigator.serviceWorker.ready, timeout])
-    .then((reg) => {
-      if (reg && reg.showNotification) reg.showNotification(title, opts);
-      else showViaConstructor();
-    })
-    .catch(showViaConstructor);
-}
-function computeNotifyMoment(todo){
-  if (!todo.notifyAdvance || todo.notifyAdvance === 'none') return null;
-  const dateStr = todo.notifyDate || todo.date;
-  if (!dateStr) return null;
-  const timeStr = todo.notifyTime || '09:00';
-  const [h, m] = timeStr.split(':').map(Number);
-  const base = fromISO(dateStr);
-  base.setHours(h || 0, m || 0, 0, 0);
-  const offset = NOTIFY_ADVANCE_MS[todo.notifyAdvance] || 0;
-  return new Date(base.getTime() - offset);
-}
-function getNotifiedMap(){
-  try { return JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '{}'); } catch(e){ return {}; }
-}
-function setNotifiedMap(map){
-  try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(map)); } catch(e){}
-}
-function fireNotification(todo){
-  const ws = getWorkspace(todo.workspaceId);
-  const title = `【${ws ? ws.name : 'ToDo'}】${todo.title}の期限です`;
-  const body = `${formatDisplayDate(todo.date)} が期日です`;
-  if (ui.notifyPopupEnabled) showBrowserNotification(title, body, 'todo-' + todo.id);
-  if (ui.notifyAlarmEnabled) playAlarmSound();
-  showToast(title);
-}
-// Fires a real notification + beep immediately, independent of the popup/alarm toggle states —
-// lets the user confirm on their own device, right when they tap the button, whether the browser/OS
-// will actually let notifications and sound through (the app-level toggles only control whether
-// *scheduled* reminders are allowed to notify; this test bypasses them to isolate OS-level issues).
-function fireTestNotification(){
-  unlockAudio();
-  showBrowserNotification('【テスト通知】通知は正常に届いています', 'この画面が見えていれば設定は正しく機能しています', 'test-notification');
-  playAlarmSound();
-  showToast('テスト通知とアラーム音を送信しました');
-}
-function checkNotifications(){
-  if (!ui.notifyPopupEnabled && !ui.notifyAlarmEnabled) return;
-  const now = Date.now();
-  const notifiedMap = getNotifiedMap();
-  const liveIds = new Set(db.todos.map(t => t.id));
-  let changed = false;
-  Object.keys(notifiedMap).forEach(id => {
-    if (!liveIds.has(id)) { delete notifiedMap[id]; changed = true; }
-  });
-  db.todos.forEach(t => {
-    if (t.done) return;
-    const moment = computeNotifyMoment(t);
-    if (!moment) return;
-    const momentMs = moment.getTime();
-    if (momentMs > now) return;
-    if (notifiedMap[t.id] === momentMs) return;
-    console.log('[通知] 発火:', t.title, '予定時刻=', moment.toISOString(), '現在時刻=', new Date(now).toISOString());
-    fireNotification(t);
-    notifiedMap[t.id] = momentMs;
-    changed = true;
-  });
-  if (changed) setNotifiedMap(notifiedMap);
-}
+// Single source of truth for reminder delivery: a Cloud Function (functions/index.js, deployed
+// separately — see the deployment notes) watches Firestore on a schedule and sends exactly one FCM
+// push per due reminder to every registered device token. This worker/page code never re-evaluates
+// "is it time yet" itself, so there is no local timer that could fire a second, duplicate alert for
+// the same reminder — the old setInterval + local Notification()/Service-Worker-timer approach has
+// been removed for that reason.
 function registerServiceWorker(){
-  if (!('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.register('sw.js').catch((e) => console.error(e));
-  // The worker reports back once it fires a background reminder on its own, so the foreground
-  // notifiedMap stays in sync and checkNotifications() doesn't re-notify for the same moment
-  // when the app is reopened.
-  navigator.serviceWorker.addEventListener('message', (event) => {
-    const msg = event.data || {};
-    if (msg.type === 'sw-notified' && msg.id) {
-      const map = getNotifiedMap();
-      map[msg.id] = msg.momentMs;
-      setNotifiedMap(map);
-    }
-  });
+  if (!navigator.serviceWorker) return Promise.resolve(null);
+  return navigator.serviceWorker.register('firebase-messaging-sw.js')
+    .then((reg) => { swRegistration = reg; return reg; })
+    .catch((e) => { console.error(e); return null; });
 }
-// Don't bother scheduling further out than this — a service worker can be killed by the browser/OS
-// at any time while idle, so a very long-dated timer is unlikely to survive anyway. The foreground
-// 10-second loop (checkNotifications) remains the reliable path whenever the app is actually open;
-// this is strictly a best-effort extension for the "recently backgrounded" window.
-const SW_SCHEDULE_HORIZON_MS = 6 * 3600 * 1000;
-let lastScheduledSwIds = [];
-function scheduleServiceWorkerNotifications(){
-  if (!ui.notifyPopupEnabled || !('serviceWorker' in navigator)) return;
-  navigator.serviceWorker.ready.then((reg) => {
-    if (!reg.active) return;
-    const now = Date.now();
-    const notifiedMap = getNotifiedMap();
-    const items = [];
-    db.todos.forEach((t) => {
-      if (t.done) return;
-      const moment = computeNotifyMoment(t);
-      if (!moment) return;
-      const momentMs = moment.getTime();
-      const delayMs = momentMs - now;
-      if (delayMs < 0 || delayMs > SW_SCHEDULE_HORIZON_MS) return;
-      if (notifiedMap[t.id] === momentMs) return;
-      const ws = getWorkspace(t.workspaceId);
-      items.push({
-        id: t.id, momentMs, delayMs,
-        title: `【${ws ? ws.name : 'ToDo'}】${t.title}の期限です`,
-        body: `${formatDisplayDate(t.date)} が期日です`,
-        tag: 'todo-' + t.id
-      });
+function initMessaging(app){
+  if (!('Notification' in window) || !firebase.messaging) return Promise.resolve(null);
+  // isSupported() returns a plain boolean in some SDK builds and a Promise<boolean> in others —
+  // Promise.resolve() normalizes both so this works either way.
+  const supportedCheck = firebase.messaging.isSupported ? firebase.messaging.isSupported() : true;
+  return Promise.resolve(supportedCheck).then((supported) => {
+    if (!supported) return null;
+    if (messagingUnsub) { messagingUnsub(); messagingUnsub = null; }
+    messaging = firebase.messaging(app);
+    // FCM only auto-displays a system notification for messages received while the app is NOT in
+    // the foreground (handled by firebase-messaging-sw.js's onBackgroundMessage). A foreground
+    // message must be displayed manually — this is where the app's own popup/alarm toggles apply,
+    // since the user is actively looking at the app and the Web Audio beep can only play here
+    // anyway (a service worker has no Web Audio API).
+    messagingUnsub = messaging.onMessage((payload) => {
+      const data = payload.data || {};
+      const notification = payload.notification || {};
+      const title = notification.title || data.title || 'ToDo';
+      const body = notification.body || data.body || '';
+      if (ui.notifyPopupEnabled) showToast(title);
+      if (ui.notifyAlarmEnabled) playAlarmSound();
+      console.log('[FCM] フォアグラウンドで受信:', title, body);
     });
-    reg.active.postMessage({ type: 'schedule-notifications', items });
-    lastScheduledSwIds = items.map(i => i.id);
-  }).catch(() => {});
+    return messaging;
+  }).catch((e) => { console.error(e); return null; });
 }
-function cancelServiceWorkerNotifications(){
-  if (!('serviceWorker' in navigator) || !lastScheduledSwIds.length) return;
-  const ids = lastScheduledSwIds;
-  lastScheduledSwIds = [];
-  navigator.serviceWorker.ready.then((reg) => {
-    if (reg.active) reg.active.postMessage({ type: 'cancel-notifications', ids });
-  }).catch(() => {});
+// The explicit, user-initiated "通知を許可してFCM登録" action: requests OS notification permission
+// (only when not already decided — never re-prompts once granted or denied), then registers this
+// browser with FCM and saves its device token to Firestore so the Cloud Function knows where to
+// deliver reminders. Each token is its own document (keyed by the token string) rather than one
+// shared array field, so two devices registering around the same time can never race-overwrite one
+// another's entry the way the old whole-array todos sync used to.
+async function registerForPushNotifications({ silent } = {}){
+  const perm = await requestNotifyPermission();
+  console.log('[FCM] Notification.permission =', perm);
+  if (perm === 'unsupported') { if (!silent) showToast('このブラウザは通知に対応していません'); return; }
+  if (perm === 'denied') { if (!silent) showToast('通知が拒否されました。ブラウザ／端末の設定から許可してください'); renderNotifySettings(); return; }
+  if (!firestoreDb) { if (!silent) showToast('同期接続を待っています。少し待ってから再度お試しください'); return; }
+  try {
+    if (!swRegistration) swRegistration = await registerServiceWorker();
+    if (!messaging) await initMessaging(firebaseApp);
+    if (!messaging) { if (!silent) showToast('この環境はプッシュ通知に対応していません'); return; }
+    const token = await messaging.getToken({ vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swRegistration });
+    if (!token) { if (!silent) showToast('デバイストークンの取得に失敗しました'); return; }
+    fcmToken = token;
+    console.log('[FCM] token =', token);
+    await firestoreDb.collection('fcmTokens').doc(token).set({
+      token, updatedAt: Date.now(), userAgent: navigator.userAgent || ''
+    });
+    renderNotifySettings();
+    renderNotifyBanner();
+    if (!silent) {
+      // A direct, immediate confirmation on this device that permission + display actually work —
+      // independent of FCM/the network, so it still proves something even if the round trip to a
+      // Cloud Function isn't deployed yet.
+      unlockAudio();
+      if (swRegistration) swRegistration.showNotification('【テスト通知】プッシュ通知を登録しました', { body: 'この通知が見えていれば、この端末への配信は機能します', tag: 'test-notification', renotify: true });
+      playAlarmSound();
+      showToast('プッシュ通知に登録しました');
+    }
+  } catch(e) {
+    console.error(e);
+    if (!silent) showToast('登録に失敗しました: ' + e.message);
+  }
 }
 
 /* ---------------------------------------------------------------- */
@@ -1820,15 +1775,17 @@ function renderNotifySettings(){
   if (!notifyPermissionSupported()) {
     textEl.textContent = '通知許可: このブラウザは非対応';
     btn.hidden = true;
-  } else if (Notification.permission === 'granted') {
-    textEl.textContent = '通知許可: 許可済み';
-    btn.hidden = true;
   } else if (Notification.permission === 'denied') {
     textEl.textContent = '通知許可: 拒否されています（ブラウザ設定から変更してください）';
     btn.hidden = true;
+  } else if (Notification.permission === 'granted') {
+    textEl.textContent = fcmToken ? '通知許可: 許可済み ・ FCM登録: 済み' : '通知許可: 許可済み ・ FCM登録: 未登録';
+    btn.hidden = false;
+    btn.textContent = fcmToken ? '再登録する（テスト）' : '通知を許可してFCM登録';
   } else {
     textEl.textContent = '通知許可: 未確認';
     btn.hidden = false;
+    btn.textContent = '通知を許可してFCM登録';
   }
 }
 function renderTabVisibilitySettings(){
@@ -2068,41 +2025,21 @@ function wireEvents(){
     ui.fontFamily = btn.dataset.value; applySettings(); renderSettingsModal(); savePrefs();
   });
   document.getElementById('notifyBannerEnableBtn').addEventListener('click', async () => {
-    const perm = await requestNotifyPermission();
-    if (perm === 'granted') {
-      ui.notifyPopupEnabled = true;
-      savePrefs();
-      fireTestNotification();
-    } else if (perm === 'denied') {
-      showToast('通知が拒否されました。ブラウザの設定から変更できます');
-    }
-    renderNotifyBanner();
-    renderNotifySettings();
+    ui.notifyPopupEnabled = true;
+    savePrefs();
+    await registerForPushNotifications();
   });
   document.getElementById('notifyBannerDismissBtn').addEventListener('click', () => {
     try { localStorage.setItem(NOTIFY_BANNER_DISMISSED_KEY, '1'); } catch(e){}
     renderNotifyBanner();
   });
   document.getElementById('requestNotifyPermissionBtn').addEventListener('click', async () => {
-    const perm = await requestNotifyPermission();
-    console.log('[通知] Notification.permission =', perm);
-    if (perm === 'unsupported') showToast('このブラウザは通知に対応していません');
-    else if (perm === 'denied') showToast('通知が拒否されました。ブラウザの設定から許可してください');
-    else if (perm === 'granted') fireTestNotification();
-    renderNotifySettings();
-    renderNotifyBanner();
+    await registerForPushNotifications();
   });
-  document.getElementById('notifyPopupToggle').addEventListener('change', async (e) => {
-    if (e.target.checked) {
-      showToast('通知の許可をリクエストします');
-      const perm = await requestNotifyPermission();
-      if (perm !== 'granted') {
-        e.target.checked = false;
-        showToast('ポップアップ通知を使うにはブラウザの通知許可が必要です');
-        renderNotifySettings();
-        return;
-      }
-    }
+  document.getElementById('notifyPopupToggle').addEventListener('change', (e) => {
+    // Permission + FCM registration is requested only via the explicit "通知を許可してFCM登録"
+    // button/banner (a deliberate user gesture), never implicitly from this toggle — this switch
+    // just controls whether an already-permitted foreground message is surfaced to the user.
     ui.notifyPopupEnabled = e.target.checked;
     savePrefs();
     renderNotifySettings();
@@ -2484,27 +2421,21 @@ function init(){
   renderNotifyBanner();
   registerServiceWorker();
 
-  // Periodic foreground check for due reminders, plus a catch-up check whenever the tab regains
-  // focus (mobile browsers throttle/suspend timers while backgrounded, so this loop alone can miss
-  // moments that pass while hidden). Going hidden instead hands the upcoming reminders off to the
-  // Service Worker (see scheduleServiceWorkerNotifications) so it can try to fire them on its own
-  // while this page's own JS may be suspended.
-  checkNotifications();
-  setInterval(checkNotifications, 10000);
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      scheduleServiceWorkerNotifications();
-    } else {
-      cancelServiceWorkerNotifications(); // avoid a duplicate pop right as the foreground loop resumes
-      checkNotifications();
+  // If the user already granted notification permission in a previous session, silently refresh
+  // the FCM token on each launch (tokens can rotate/expire) without re-prompting — this never asks
+  // for NEW permission; that only ever happens from the explicit "通知を許可してFCM登録"
+  // button/banner tap described above.
+  function maybeRefreshPushRegistration(){
+    if (notifyPermissionSupported() && Notification.permission === 'granted') {
+      registerForPushNotifications({ silent: true });
     }
-  });
+  }
 
   try {
     const raw = localStorage.getItem(CONFIG_KEY);
     if (raw) {
       const config = JSON.parse(raw);
-      connectFirebase(config, { silent: true }).catch(() => {});
+      connectFirebase(config, { silent: true }).then(maybeRefreshPushRegistration).catch(() => {});
     } else {
       let syncDisabled = false;
       try { syncDisabled = localStorage.getItem(SYNC_DISABLED_KEY) === '1'; } catch(e){}
@@ -2514,7 +2445,7 @@ function init(){
         // First launch on this device (or after a fresh install) — connect to the
         // built-in family database automatically so both iPhones sync out of the box.
         try { localStorage.setItem(CONFIG_KEY, JSON.stringify(DEFAULT_FIREBASE_CONFIG)); } catch(e){}
-        connectFirebase(DEFAULT_FIREBASE_CONFIG, { silent: true }).catch(() => {});
+        connectFirebase(DEFAULT_FIREBASE_CONFIG, { silent: true }).then(maybeRefreshPushRegistration).catch(() => {});
       }
     }
   } catch(e) { setSyncStatus('off'); }
