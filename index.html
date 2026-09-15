@@ -644,8 +644,9 @@ main{
         <div class="settings-label">通知・アラーム</div>
         <p class="notify-permission">
           <span id="notifyPermissionText">通知許可: 未確認</span>
-          <button type="button" class="text-btn" id="requestNotifyPermissionBtn">許可をリクエスト</button>
+          <button type="button" class="text-btn primary" id="requestNotifyPermissionBtn">通知を許可する（テスト）</button>
         </p>
+        <p class="hint">タップすると許可をリクエストし、許可されていればテスト通知とアラーム音をその場で鳴らします。鳴らない場合はブラウザ／端末側の通知設定をご確認ください。</p>
         <label class="switch-row">
           ポップアップ通知
           <span class="switch"><input type="checkbox" id="notifyPopupToggle"><span class="slider"></span></span>
@@ -1206,6 +1207,16 @@ function fireNotification(todo){
   if (ui.notifyAlarmEnabled) playAlarmSound();
   showToast(title);
 }
+// Fires a real notification + beep immediately, independent of the popup/alarm toggle states —
+// lets the user confirm on their own device, right when they tap the button, whether the browser/OS
+// will actually let notifications and sound through (the app-level toggles only control whether
+// *scheduled* reminders are allowed to notify; this test bypasses them to isolate OS-level issues).
+function fireTestNotification(){
+  unlockAudio();
+  showBrowserNotification('【テスト通知】通知は正常に届いています', 'この画面が見えていれば設定は正しく機能しています', 'test-notification');
+  playAlarmSound();
+  showToast('テスト通知とアラーム音を送信しました');
+}
 function checkNotifications(){
   if (!ui.notifyPopupEnabled && !ui.notifyAlarmEnabled) return;
   const now = Date.now();
@@ -1222,6 +1233,7 @@ function checkNotifications(){
     const momentMs = moment.getTime();
     if (momentMs > now) return;
     if (notifiedMap[t.id] === momentMs) return;
+    console.log('[通知] 発火:', t.title, '予定時刻=', moment.toISOString(), '現在時刻=', new Date(now).toISOString());
     fireNotification(t);
     notifiedMap[t.id] = momentMs;
     changed = true;
@@ -1630,6 +1642,7 @@ function openTodoModalForEdit(id){
   document.getElementById('todoNotifyDateInput').value = t.notifyDate || '';
   document.getElementById('todoNotifyTimeInput').value = t.notifyTime || '09:00';
   document.getElementById('todoNotifyAdvanceInput').value = t.notifyAdvance || 'none';
+  console.log('[通知] 編集モーダルへ復元:', { id: t.id, notifyDate: t.notifyDate, notifyTime: t.notifyTime, notifyAdvance: t.notifyAdvance });
   document.getElementById('todoProgressInput').value = t.progress || '';
   document.getElementById('todoModal').hidden = false;
 }
@@ -1657,6 +1670,7 @@ function saveTodoModal(){
   const notifyAdvance = document.getElementById('todoNotifyAdvanceInput').value || 'none';
   const notifyDate = notifyAdvance !== 'none' ? (document.getElementById('todoNotifyDateInput').value || date) : null;
   const notifyTime = notifyAdvance !== 'none' ? (document.getElementById('todoNotifyTimeInput').value || '09:00') : null;
+  console.log('[通知] フォームから取得した通知設定:', { notifyDate, notifyTime, notifyAdvance });
   if (editingTodoId) {
     updateTodo(editingTodoId, { title, date, workspaceId, genreId, progress, done, color, notifyDate, notifyTime, notifyAdvance });
   } else {
@@ -2006,7 +2020,7 @@ function wireEvents(){
     if (perm === 'granted') {
       ui.notifyPopupEnabled = true;
       savePrefs();
-      showToast('通知を有効にしました');
+      fireTestNotification();
     } else if (perm === 'denied') {
       showToast('通知が拒否されました。ブラウザの設定から変更できます');
     }
@@ -2019,9 +2033,10 @@ function wireEvents(){
   });
   document.getElementById('requestNotifyPermissionBtn').addEventListener('click', async () => {
     const perm = await requestNotifyPermission();
+    console.log('[通知] Notification.permission =', perm);
     if (perm === 'unsupported') showToast('このブラウザは通知に対応していません');
     else if (perm === 'denied') showToast('通知が拒否されました。ブラウザの設定から許可してください');
-    else if (perm === 'granted') showToast('通知を許可しました');
+    else if (perm === 'granted') fireTestNotification();
     renderNotifySettings();
     renderNotifyBanner();
   });
@@ -2420,7 +2435,7 @@ function init(){
   // Periodic background check for due reminders, plus an immediate check and a catch-up
   // check whenever the tab regains focus (mobile browsers throttle timers while backgrounded).
   checkNotifications();
-  setInterval(checkNotifications, 30000);
+  setInterval(checkNotifications, 10000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNotifications(); });
 
   try {
