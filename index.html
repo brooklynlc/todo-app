@@ -706,6 +706,7 @@ const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1we
 // at the right time is done server-side by a Cloud Function (see functions/index.js); this key only
 // lets the browser obtain a device token so that function knows where to deliver it.
 const FCM_VAPID_KEY = 'BHYUe6zVDfRMOZtlzT7ssS36NEJBn_rhaVBn9pZN4jUzJEZvV4HsO2fR8ucjlHlyCXJil__LAWJc2L4vwq_E_-8';
+const FCM_TOKEN_KEY = 'todoapp_fcm_token_v1';
 // Built-in family database — every device connects here automatically so both iPhones stay in sync out of the box.
 const DEFAULT_FIREBASE_CONFIG = {
   apiKey: "AIzaSyA2Uaj4RfbAESV4WQE2qFmoRojnQYAzOHM",
@@ -1331,6 +1332,20 @@ async function registerForPushNotifications({ silent } = {}){
     if (!token) { console.warn('[FCM] getToken() が空の結果を返しました'); if (!silent) showToast('デバイストークンの取得に失敗しました'); return; }
     fcmToken = token;
     console.log('[FCM] token =', token);
+    // FCM can hand back a NEW token on this same device across sessions (SW update, cache clear,
+    // browser quirk, etc.), and each registration used to just add another fcmTokens/{token}
+    // document without ever removing the old one. Left unchecked, one physical device accumulates
+    // several still-valid tokens over time, and the Cloud Function (which sends to every token in
+    // the collection) then delivers the SAME reminder once per stale token — this is what caused
+    // reminders to arrive 2-3x in a row. Track this device's last-known token locally and delete
+    // its old Firestore entry whenever a new one replaces it.
+    let previousToken = null;
+    try { previousToken = localStorage.getItem(FCM_TOKEN_KEY); } catch(e){}
+    if (previousToken && previousToken !== token) {
+      console.log('[FCM] 古いトークンを削除:', previousToken);
+      firestoreDb.collection('fcmTokens').doc(previousToken).delete().catch((e) => console.error('[FCM] 古いトークンの削除に失敗:', e));
+    }
+    try { localStorage.setItem(FCM_TOKEN_KEY, token); } catch(e){}
     await firestoreDb.collection('fcmTokens').doc(token).set({
       token, updatedAt: Date.now(), userAgent: navigator.userAgent || ''
     });

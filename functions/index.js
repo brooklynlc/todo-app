@@ -62,6 +62,14 @@ function computeNotifyMomentMs(todo){
 // contention) also means this never clobbers a concurrent edit the client made to some other field
 // on the same todo, or to a different todo in the same array — only the matched item's `notified`/
 // `notifiedAt` fields are touched, and every other item is written back exactly as just read.
+// NOTE on notifiedAt: the spec for this fix asked for
+// `notifiedAt: admin.firestore.FieldValue.serverTimestamp()`, but that sentinel is documented as
+// unsupported inside array elements — `todos` here is an array field on todoAppData/main, and each
+// todo is one element of it, so writing that sentinel into `updatedTodos[idx]` would make the whole
+// transaction throw ("FieldValue.serverTimestamp() is not currently supported inside arrays") and
+// the reminder would never get claimed or sent at all. Date.now() is used instead: since the
+// Cloud Function's own clock (not the client's) is authoritative here, this doesn't lose the
+// property the request was after (a trustworthy, tamper-proof send timestamp).
 async function claimReminder(todoId){
   return db.runTransaction(async (tx) => {
     const snap = await tx.get(mainRef);
@@ -71,7 +79,17 @@ async function claimReminder(todoId){
     const idx = todos.findIndex((t) => t && t.id === todoId);
     if (idx === -1) return null;
     const todo = todos[idx];
-    if (todo.done || todo.notified) return null; // already handled, or claimed by a concurrent run
+    // The `notified` check happens again here, inside the transaction, against a FRESH read —
+    // this is what actually makes the claim atomic. The outer scan in sendDueReminders() only
+    // reads todoAppData/main once to build a candidate list; if two invocations overlap (e.g. one
+    // run's FCM sends are still in flight when the next minute's run starts) both could reach this
+    // point for the same todo, but Firestore transactions serialize against each other on the same
+    // document, so only the first to commit sees `notified` still false — the second's re-read
+    // inside its own transaction attempt sees `notified: true` already and returns null here.
+    if (todo.done || todo.notified) {
+      console.log('claimReminder: skipping', todoId, '(already done or already notified — no send will happen)');
+      return null;
+    }
     // updatedAt must be bumped here too, not just notifiedAt: the client's own sync merge
     // (mergeTodoState in index.html) picks whichever copy of a todo has the LATER updatedAt, and
     // favors the local copy on a tie. If this claim left updatedAt unchanged, a client pushing its
@@ -83,6 +101,7 @@ async function claimReminder(todoId){
     const updatedTodos = todos.slice();
     updatedTodos[idx] = claimed;
     tx.update(mainRef, { todos: updatedTodos });
+    console.log('claimReminder: claimed', todoId, '- proceeding to send exactly once');
     return claimed;
   });
 }
@@ -90,6 +109,15 @@ async function claimReminder(todoId){
 // Runs every minute: finds ToDos whose notification moment fell within the last 5 minutes (so one
 // missed/slow run can't silently drop a reminder) and that aren't already `notified`, claims each
 // one, then sends it to every registered device token with admin.messaging().send().
+//
+// On `.where('notified', '!=', true)`: this app stores all todos as one array field inside a
+// single document (todoAppData/main), not as one Firestore document per todo, so there is no
+// `todos` collection to run a `.where()` query against — Firestore queries operate on collections
+// of documents, not on elements inside an array field. The equivalent, and the only thing possible
+// with this data shape, is the in-memory `!t.notified` filter below, applied after reading the one
+// document. The actual duplicate-send guarantee doesn't come from that filter anyway (which only
+// narrows candidates) — it comes from claimReminder()'s transaction re-checking `notified` against
+// a fresh read at claim time, which is what's atomic.
 exports.sendDueReminders = onSchedule(
   { schedule: 'every 1 minutes', region: 'asia-northeast1', timeZone: 'Asia/Tokyo' },
   async () => {
@@ -101,13 +129,16 @@ exports.sendDueReminders = onSchedule(
     const now = Date.now();
     const LOOKBACK_MS = 5 * 60 * 1000;
 
-    const dueIds = todos
-      .filter((t) => t && !t.done && !t.notified)
-      .map((t) => ({ id: t.id, momentMs: computeNotifyMomentMs(t) }))
-      .filter(({ momentMs }) => momentMs != null && momentMs <= now && momentMs > now - LOOKBACK_MS)
-      .map(({ id }) => id);
+    const dueIds = Array.from(new Set(
+      todos
+        .filter((t) => t && !t.done && !t.notified)
+        .map((t) => ({ id: t.id, momentMs: computeNotifyMomentMs(t) }))
+        .filter(({ momentMs }) => momentMs != null && momentMs <= now && momentMs > now - LOOKBACK_MS)
+        .map(({ id }) => id)
+    ));
 
     if (!dueIds.length) return;
+    console.log('due candidates this run:', dueIds);
 
     const claimedTodos = [];
     for (const id of dueIds) {
@@ -117,7 +148,10 @@ exports.sendDueReminders = onSchedule(
     if (!claimedTodos.length) return;
 
     const tokensSnap = await db.collection('fcmTokens').get();
-    const tokens = tokensSnap.docs.map((d) => d.id);
+    // De-duplicated defensively — Firestore document ids are already unique, so this only guards
+    // against a theoretical caller writing the same token string under two different doc ids.
+    const tokens = Array.from(new Set(tokensSnap.docs.map((d) => d.id)));
+    console.log('registered device tokens:', tokens.length, '— if this is higher than your actual number of devices, the same reminder will visibly repeat once per extra token (see index.html\'s token-replacement fix, and prune stale entries from the fcmTokens collection in the Firebase Console).');
     if (!tokens.length) {
       console.log('due reminders found but no fcmTokens registered:', claimedTodos.map((t) => t.title));
       return;
