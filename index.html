@@ -700,6 +700,7 @@ const CONFIG_KEY = 'todoapp_firebase_config_v1';
 const SYNC_DISABLED_KEY = 'todoapp_sync_disabled_v1';
 const PREF_KEY = 'todoapp_prefs_v1';
 const NOTIFY_BANNER_DISMISSED_KEY = 'todoapp_notify_banner_dismissed_v1';
+const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1week': 604800000 };
 // Web Push certificate key pair (public key) for this Firebase project's Cloud Messaging — required
 // by messaging.getToken() to register this browser for push. Sending the actual scheduled reminder
 // at the right time is done server-side by a Cloud Function (see functions/index.js); this key only
@@ -1174,17 +1175,97 @@ function requestNotifyPermission(){
   if (Notification.permission === 'granted') return Promise.resolve('granted');
   return Notification.requestPermission();
 }
-// Single source of truth for reminder delivery: a Cloud Function (functions/index.js, deployed
-// separately — see the deployment notes) watches Firestore on a schedule and sends exactly one FCM
-// push per due reminder to every registered device token. This worker/page code never re-evaluates
-// "is it time yet" itself, so there is no local timer that could fire a second, duplicate alert for
-// the same reminder — the old setInterval + local Notification()/Service-Worker-timer approach has
-// been removed for that reason.
+// Registering the Service Worker must never be able to take the rest of the app down with it —
+// the file might be missing (e.g. a deploy that didn't include it), the browser might reject
+// registration for an unrelated reason, or navigator.serviceWorker.register() could in principle
+// throw synchronously in some environment. Both the synchronous call and the returned promise are
+// guarded so a failure here only disables push registration, never the rest of the app.
 function registerServiceWorker(){
-  if (!navigator.serviceWorker) return Promise.resolve(null);
-  return navigator.serviceWorker.register('firebase-messaging-sw.js')
-    .then((reg) => { swRegistration = reg; return reg; })
-    .catch((e) => { console.error(e); return null; });
+  if (!navigator.serviceWorker) { console.warn('[SW] このブラウザはService Workerに対応していません'); return Promise.resolve(null); }
+  try {
+    return navigator.serviceWorker.register('firebase-messaging-sw.js')
+      .then((reg) => { swRegistration = reg; console.log('[SW] firebase-messaging-sw.js を登録しました'); return reg; })
+      .catch((e) => { console.error('[SW] 登録に失敗しました（firebase-messaging-sw.js が見つからない可能性があります）:', e); return null; });
+  } catch(e) {
+    console.error('[SW] register() の呼び出しで例外が発生しました:', e);
+    return Promise.resolve(null);
+  }
+}
+/* ---------------------------------------------------------------- */
+/* Local foreground reminder loop — always-on fallback                */
+/* ---------------------------------------------------------------- */
+// FCM (below) is the intended path for reminders while the app is backgrounded or fully closed,
+// but it only works once functions/index.js is deployed as a Cloud Function AND getToken()
+// succeeds on this device/browser. Neither is guaranteed (no deploy yet, VAPID/browser mismatch,
+// permission denied, offline, etc.), so this loop is kept running unconditionally as long as the
+// app is open — it is what actually fires most reminders today, with FCM layered on top for
+// whenever a device is backgrounded and the server-side piece exists. The dedupe map + shared
+// notification "tag" keep this from double-firing alongside an FCM push for the same reminder.
+const NOTIFIED_KEY = 'todoapp_notified_v1';
+function computeNotifyMoment(todo){
+  if (!todo.notifyAdvance || todo.notifyAdvance === 'none') return null;
+  const dateStr = todo.notifyDate || todo.date;
+  if (!dateStr) return null;
+  const timeStr = todo.notifyTime || '09:00';
+  const [h, m] = timeStr.split(':').map(Number);
+  const base = fromISO(dateStr);
+  base.setHours(h || 0, m || 0, 0, 0);
+  const offset = NOTIFY_ADVANCE_MS[todo.notifyAdvance] || 0;
+  return new Date(base.getTime() - offset);
+}
+function getNotifiedMap(){
+  try { return JSON.parse(localStorage.getItem(NOTIFIED_KEY) || '{}'); } catch(e){ return {}; }
+}
+function setNotifiedMap(map){
+  try { localStorage.setItem(NOTIFIED_KEY, JSON.stringify(map)); } catch(e){}
+}
+function showBrowserNotification(title, body, tag){
+  if (!notifyPermissionSupported() || Notification.permission !== 'granted') return;
+  const opts = { body, tag, renotify: true };
+  const showViaConstructor = () => { try { new Notification(title, opts); } catch(e){ console.error('[通知] Notification() に失敗:', e); } };
+  if (!navigator.serviceWorker) { showViaConstructor(); return; }
+  // navigator.serviceWorker.ready never rejects — if the worker never activates (missing file,
+  // registration failed, or this is the very first page load before install completes) it would
+  // hang forever and silently swallow the notification. Race it against a short timeout and fall
+  // back to the plain Notification constructor so a reminder always fires somehow.
+  const timeout = new Promise((resolve) => setTimeout(() => resolve(null), 1500));
+  Promise.race([navigator.serviceWorker.ready, timeout])
+    .then((reg) => {
+      if (reg && reg.showNotification) reg.showNotification(title, opts);
+      else showViaConstructor();
+    })
+    .catch(showViaConstructor);
+}
+function fireNotification(todo){
+  const ws = getWorkspace(todo.workspaceId);
+  const title = `【${ws ? ws.name : 'ToDo'}】${todo.title}の期限です`;
+  const body = `${formatDisplayDate(todo.date)} が期日です`;
+  if (ui.notifyPopupEnabled) showBrowserNotification(title, body, 'todo-' + todo.id);
+  if (ui.notifyAlarmEnabled) playAlarmSound();
+  showToast(title);
+}
+function checkNotifications(){
+  if (!ui.notifyPopupEnabled && !ui.notifyAlarmEnabled) return;
+  const now = Date.now();
+  const notifiedMap = getNotifiedMap();
+  const liveIds = new Set(db.todos.map(t => t.id));
+  let changed = false;
+  Object.keys(notifiedMap).forEach(id => {
+    if (!liveIds.has(id)) { delete notifiedMap[id]; changed = true; }
+  });
+  db.todos.forEach(t => {
+    if (t.done) return;
+    const moment = computeNotifyMoment(t);
+    if (!moment) return;
+    const momentMs = moment.getTime();
+    if (momentMs > now) return;
+    if (notifiedMap[t.id] === momentMs) return;
+    console.log('[通知] ローカルチェックで発火:', t.title, '予定時刻=', moment.toISOString(), '現在時刻=', new Date(now).toISOString());
+    fireNotification(t);
+    notifiedMap[t.id] = momentMs;
+    changed = true;
+  });
+  if (changed) setNotifiedMap(notifiedMap);
 }
 function initMessaging(app){
   if (!('Notification' in window) || !firebase.messaging) return Promise.resolve(null);
@@ -1205,9 +1286,10 @@ function initMessaging(app){
       const notification = payload.notification || {};
       const title = notification.title || data.title || 'ToDo';
       const body = notification.body || data.body || '';
-      if (ui.notifyPopupEnabled) showToast(title);
-      if (ui.notifyAlarmEnabled) playAlarmSound();
       console.log('[FCM] フォアグラウンドで受信:', title, body);
+      if (ui.notifyPopupEnabled) showBrowserNotification(title, body, data.tag || 'todo-fcm');
+      if (ui.notifyAlarmEnabled) playAlarmSound();
+      showToast(title);
     });
     return messaging;
   }).catch((e) => { console.error(e); return null; });
@@ -1221,15 +1303,31 @@ function initMessaging(app){
 async function registerForPushNotifications({ silent } = {}){
   const perm = await requestNotifyPermission();
   console.log('[FCM] Notification.permission =', perm);
-  if (perm === 'unsupported') { if (!silent) showToast('このブラウザは通知に対応していません'); return; }
-  if (perm === 'denied') { if (!silent) showToast('通知が拒否されました。ブラウザ／端末の設定から許可してください'); renderNotifySettings(); return; }
+  renderNotifySettings();
+  if (perm === 'unsupported') { if (!silent) showToast('このブラウザは通知に対応していません（アプリを開いている間の通知は引き続き利用できます）'); return; }
+  if (perm === 'denied') { if (!silent) showToast('通知が拒否されました。ブラウザ／端末の設定から許可してください'); return; }
   if (!firestoreDb) { if (!silent) showToast('同期接続を待っています。少し待ってから再度お試しください'); return; }
   try {
     if (!swRegistration) swRegistration = await registerServiceWorker();
     if (!messaging) await initMessaging(firebaseApp);
-    if (!messaging) { if (!silent) showToast('この環境はプッシュ通知に対応していません'); return; }
-    const token = await messaging.getToken({ vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swRegistration });
-    if (!token) { if (!silent) showToast('デバイストークンの取得に失敗しました'); return; }
+    if (!messaging) {
+      console.warn('[FCM] messagingを初期化できませんでした。プッシュ通知は無効ですが、アプリを開いている間のローカル通知チェックは引き続き動作します。');
+      if (!silent) showToast('プッシュ通知には対応していませんが、アプリを開いている間の通知は引き続き動作します');
+      return;
+    }
+    // getToken() failing here (network issue, VAPID/project mismatch, browser quirk, etc.) must
+    // never take down the rest of the app's notification handling — it only means this device
+    // won't receive push while backgrounded/closed; checkNotifications() keeps working regardless
+    // since it doesn't depend on messaging at all.
+    let token = null;
+    try {
+      token = await messaging.getToken({ vapidKey: FCM_VAPID_KEY, serviceWorkerRegistration: swRegistration });
+    } catch(tokenErr) {
+      console.error('[FCM] getToken() に失敗しました（アプリを開いている間の通知には影響しません）:', tokenErr);
+      if (!silent) showToast('プッシュ登録に失敗しましたが、アプリを開いている間の通知は引き続き動作します');
+      return;
+    }
+    if (!token) { console.warn('[FCM] getToken() が空の結果を返しました'); if (!silent) showToast('デバイストークンの取得に失敗しました'); return; }
     fcmToken = token;
     console.log('[FCM] token =', token);
     await firestoreDb.collection('fcmTokens').doc(token).set({
@@ -1247,8 +1345,8 @@ async function registerForPushNotifications({ silent } = {}){
       showToast('プッシュ通知に登録しました');
     }
   } catch(e) {
-    console.error(e);
-    if (!silent) showToast('登録に失敗しました: ' + e.message);
+    console.error('[FCM] 登録処理でエラー（アプリを開いている間の通知には影響しません）:', e);
+    if (!silent) showToast('登録に失敗しましたが、アプリを開いている間の通知は引き続き動作します');
   }
 }
 
@@ -1773,20 +1871,23 @@ function renderNotifySettings(){
   const textEl = document.getElementById('notifyPermissionText');
   const btn = document.getElementById('requestNotifyPermissionBtn');
   if (!notifyPermissionSupported()) {
-    textEl.textContent = '通知許可: このブラウザは非対応';
+    textEl.textContent = '通知許可状態: unsupported（このブラウザは通知に非対応）';
     btn.hidden = true;
   } else if (Notification.permission === 'denied') {
-    textEl.textContent = '通知許可: 拒否されています（ブラウザ設定から変更してください）';
+    textEl.textContent = '通知許可状態: denied（拒否されています。ブラウザ設定から変更してください）';
     btn.hidden = true;
   } else if (Notification.permission === 'granted') {
-    textEl.textContent = fcmToken ? '通知許可: 許可済み ・ FCM登録: 済み' : '通知許可: 許可済み ・ FCM登録: 未登録';
+    textEl.textContent = fcmToken
+      ? '通知許可状態: granted ・ FCM登録: 済み'
+      : '通知許可状態: granted ・ FCM登録: 未登録（アプリを開いている間の通知は動作します）';
     btn.hidden = false;
     btn.textContent = fcmToken ? '再登録する（テスト）' : '通知を許可してFCM登録';
   } else {
-    textEl.textContent = '通知許可: 未確認';
+    textEl.textContent = '通知許可状態: default（未確認）';
     btn.hidden = false;
     btn.textContent = '通知を許可してFCM登録';
   }
+  console.log('[通知] renderNotifySettings: Notification.permission =', notifyPermissionSupported() ? Notification.permission : 'unsupported', ', fcmToken =', fcmToken ? '(取得済み)' : null);
 }
 function renderTabVisibilitySettings(){
   const list = document.getElementById('tabVisibilityList');
@@ -2420,6 +2521,12 @@ function init(){
   renderAll();
   renderNotifyBanner();
   registerServiceWorker();
+
+  // Always-on local fallback so reminders work regardless of whether FCM/the Cloud Function is
+  // deployed or getToken() succeeded on this device — see the comment above checkNotifications().
+  checkNotifications();
+  setInterval(checkNotifications, 10000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) checkNotifications(); });
 
   // If the user already granted notification permission in a previous session, silently refresh
   // the FCM token on each launch (tokens can rotate/expire) without re-prompting — this never asks
