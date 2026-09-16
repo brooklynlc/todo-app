@@ -853,6 +853,7 @@ function migrateTodos(){
     if (!t.workspaceId) t.workspaceId = fallback;
     normalizeNotifyFields(t);
     if (!t.updatedAt) t.updatedAt = t.createdAt || Date.now();
+    if (typeof t.notified !== 'boolean') t.notified = false;
   });
   const groups = {};
   db.todos.forEach(t => {
@@ -1619,6 +1620,7 @@ function addTodo({ title, date, workspaceId, genreId, progress, done, color, not
     workspaceId: ws,
     genreId: genreId || null, progress: progress || '', done: !!done, color: color || null,
     notifyDate: notifyDate || null, notifyTime: notifyTime || null, notifyAdvance: notifyAdvance || 'none',
+    notified: false,
     order: nextOrderFor(ws, date), createdAt: now, updatedAt: now
   };
   db.todos.push(todo);
@@ -1633,8 +1635,15 @@ function updateTodo(id, patch){
   if (newDate !== t.date || newWs !== t.workspaceId) {
     patch = Object.assign({}, patch, { order: nextOrderFor(newWs, newDate) });
   }
+  // If the notification schedule itself is changing, clear the server's `notified` flag (set by
+  // the Cloud Function after it sends a push — see functions/index.js) so the new moment can fire.
+  // Otherwise a reminder edited after it already fired once would silently never fire again.
+  const notifyChanged = ['notifyDate', 'notifyTime', 'notifyAdvance'].some(
+    (k) => k in patch && patch[k] !== t[k]
+  );
   Object.assign(t, patch);
   normalizeNotifyFields(t);
+  if (notifyChanged) t.notified = false;
   t.updatedAt = Date.now();
   persist();
 }

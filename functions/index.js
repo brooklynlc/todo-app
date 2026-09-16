@@ -4,8 +4,8 @@
 // date/time" settings to Firestore and it can register this device for FCM, but nothing running
 // only in a browser tab can reliably wake up and send a push once the tab/PWA has been fully
 // closed. That requires a server watching the clock and calling the FCM Admin SDK, which is what
-// this function does: it runs on a schedule, finds any ToDo whose notification moment has just
-// arrived, and sends exactly one push to every registered device.
+// this function does: every minute it scans for a ToDo whose notification moment has just arrived
+// and is not yet `notified`, sends it to every registered device, and marks it `notified: true`.
 //
 // ── Deployment (must be done by a project owner with the Firebase CLI — this code is not deployed
 //    automatically just by being in this repo) ──
@@ -17,18 +17,19 @@
 //   3. Requires the Blaze (pay-as-you-go) plan — Cloud Functions and Cloud Scheduler are not
 //      available on the free Spark plan. Realistic cost for two devices checking once a minute is
 //      well within the free tier's monthly quota, but Blaze must still be enabled to deploy at all.
-//   4. In the Firebase Console → Firestore → Rules, make sure the `fcmTokens` and `sentReminders`
-//      collections are at least as permissive as `todoAppData` already is (this app has no auth, so
-//      those collections need open read/write from the client for token registration to work) —
-//      e.g. add `match /fcmTokens/{token} { allow read, write: if true; }` and
-//      `match /sentReminders/{id} { allow read, write: if true; }` alongside the existing rules.
-//      (The function itself uses the Admin SDK, which always bypasses these rules — only the
-//      client's own token-registration write needs the rule.)
+//   4. In the Firebase Console → Firestore → Rules, make sure the `fcmTokens` collection is at
+//      least as permissive as `todoAppData` already is (this app has no auth, so it needs open
+//      read/write from the client for token registration to work) — e.g. add
+//      `match /fcmTokens/{token} { allow read, write: if true; }` alongside the existing rules.
+//      (This function itself uses the Admin SDK, which always bypasses these rules — only the
+//      client's own token-registration write needs the rule. Writes to `todoAppData/main`, incl.
+//      the `notified` flag this function sets, already work under whatever rule lets the app sync.)
 
 const { onSchedule } = require('firebase-functions/v2/scheduler');
 const admin = require('firebase-admin');
 admin.initializeApp();
 const db = admin.firestore();
+const mainRef = db.collection('todoAppData').doc('main');
 
 const NOTIFY_ADVANCE_MS = { onTime: 0, '1day': 86400000, '2day': 172800000, '1week': 604800000 };
 
@@ -52,13 +53,47 @@ function computeNotifyMomentMs(todo){
   return jstMomentAsUtcMs - offset;
 }
 
-// Runs every minute; looks back 5 minutes so a single missed/slow run can't silently drop a
-// reminder, while `sentReminders` tombstones (keyed by todoId+moment) stop it from ever being sent
-// twice across runs.
+// Transactionally flips `notified` from falsy to true for one specific todo id and returns the
+// freshly-read (post-claim) todo object, or null if it can't be claimed (already notified, marked
+// done, or deleted since the outer scan ran). Doing this claim BEFORE sending — rather than sending
+// first and marking after — means two overlapping function invocations (or a retry after a crash
+// mid-send) can never both send the same reminder: only one of them will win the transactional
+// write. Reading the document fresh inside the transaction (Firestore retries automatically on
+// contention) also means this never clobbers a concurrent edit the client made to some other field
+// on the same todo, or to a different todo in the same array — only the matched item's `notified`/
+// `notifiedAt` fields are touched, and every other item is written back exactly as just read.
+async function claimReminder(todoId){
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(mainRef);
+    if (!snap.exists) return null;
+    const data = snap.data() || {};
+    const todos = Array.isArray(data.todos) ? data.todos : [];
+    const idx = todos.findIndex((t) => t && t.id === todoId);
+    if (idx === -1) return null;
+    const todo = todos[idx];
+    if (todo.done || todo.notified) return null; // already handled, or claimed by a concurrent run
+    // updatedAt must be bumped here too, not just notifiedAt: the client's own sync merge
+    // (mergeTodoState in index.html) picks whichever copy of a todo has the LATER updatedAt, and
+    // favors the local copy on a tie. If this claim left updatedAt unchanged, a client pushing its
+    // own still-`notified:false` copy with that same old updatedAt shortly after would win the tie
+    // and silently flip `notified` back to false — causing this function to send the same reminder
+    // again on its next run.
+    const now = Date.now();
+    const claimed = Object.assign({}, todo, { notified: true, notifiedAt: now, updatedAt: now });
+    const updatedTodos = todos.slice();
+    updatedTodos[idx] = claimed;
+    tx.update(mainRef, { todos: updatedTodos });
+    return claimed;
+  });
+}
+
+// Runs every minute: finds ToDos whose notification moment fell within the last 5 minutes (so one
+// missed/slow run can't silently drop a reminder) and that aren't already `notified`, claims each
+// one, then sends it to every registered device token with admin.messaging().send().
 exports.sendDueReminders = onSchedule(
   { schedule: 'every 1 minutes', region: 'asia-northeast1', timeZone: 'Asia/Tokyo' },
   async () => {
-    const mainDoc = await db.collection('todoAppData').doc('main').get();
+    const mainDoc = await mainRef.get();
     if (!mainDoc.exists) return;
     const data = mainDoc.data() || {};
     const todos = Array.isArray(data.todos) ? data.todos : [];
@@ -66,44 +101,53 @@ exports.sendDueReminders = onSchedule(
     const now = Date.now();
     const LOOKBACK_MS = 5 * 60 * 1000;
 
-    const due = todos
-      .filter((t) => t && !t.done)
-      .map((t) => ({ todo: t, momentMs: computeNotifyMomentMs(t) }))
-      .filter(({ momentMs }) => momentMs != null && momentMs <= now && momentMs > now - LOOKBACK_MS);
+    const dueIds = todos
+      .filter((t) => t && !t.done && !t.notified)
+      .map((t) => ({ id: t.id, momentMs: computeNotifyMomentMs(t) }))
+      .filter(({ momentMs }) => momentMs != null && momentMs <= now && momentMs > now - LOOKBACK_MS)
+      .map(({ id }) => id);
 
-    if (!due.length) return;
+    if (!dueIds.length) return;
+
+    const claimedTodos = [];
+    for (const id of dueIds) {
+      const claimed = await claimReminder(id);
+      if (claimed) claimedTodos.push(claimed);
+    }
+    if (!claimedTodos.length) return;
 
     const tokensSnap = await db.collection('fcmTokens').get();
     const tokens = tokensSnap.docs.map((d) => d.id);
-    if (!tokens.length) return;
+    if (!tokens.length) {
+      console.log('due reminders found but no fcmTokens registered:', claimedTodos.map((t) => t.title));
+      return;
+    }
 
-    for (const { todo, momentMs } of due) {
-      const sentRef = db.collection('sentReminders').doc(`${todo.id}_${momentMs}`);
-      const sentDoc = await sentRef.get();
-      if (sentDoc.exists) continue;
-
+    const invalidTokens = new Set();
+    for (const todo of claimedTodos) {
       const workspace = workspaces.find((w) => w && w.id === todo.workspaceId);
       const title = `【${workspace ? workspace.name : 'ToDo'}】${todo.title}の期限です`;
       const body = `${todo.date} が期日です`;
 
-      const response = await admin.messaging().sendEachForMulticast({
-        notification: { title, body },
-        data: { tag: `todo-${todo.id}` },
-        tokens
-      });
-
-      // Drop tokens FCM says are no longer valid (app uninstalled, permission revoked, etc.) so the
-      // token list doesn't grow unbounded with dead entries.
-      const invalidTokens = [];
-      response.responses.forEach((r, i) => {
-        const code = r.error && r.error.code;
-        if (!r.success && (code === 'messaging/registration-token-not-registered' || code === 'messaging/invalid-registration-token')) {
-          invalidTokens.push(tokens[i]);
+      for (const token of tokens) {
+        try {
+          await admin.messaging().send({
+            token,
+            notification: { title, body },
+            data: { tag: `todo-${todo.id}` }
+          });
+          console.log('sent reminder', todo.id, 'to token', token.slice(0, 12) + '…');
+        } catch (err) {
+          console.error('send failed for token', token.slice(0, 12) + '…', ':', err.code || err.message);
+          if (err.code === 'messaging/registration-token-not-registered' || err.code === 'messaging/invalid-registration-token') {
+            invalidTokens.add(token);
+          }
         }
-      });
-      await Promise.all(invalidTokens.map((tok) => db.collection('fcmTokens').doc(tok).delete()));
-
-      await sentRef.set({ sentAt: now, title });
+      }
     }
+
+    // Drop tokens FCM says are no longer valid (app uninstalled, permission revoked, etc.) so the
+    // token list doesn't grow unbounded with dead entries.
+    await Promise.all(Array.from(invalidTokens).map((tok) => db.collection('fcmTokens').doc(tok).delete()));
   }
 );
